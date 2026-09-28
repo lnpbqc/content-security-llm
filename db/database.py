@@ -30,6 +30,7 @@ class Database:
                 CREATE TABLE IF NOT EXISTS call_records (
                     id TEXT PRIMARY KEY,
                     model_id TEXT NOT NULL REFERENCES models(id),
+                    token_hash TEXT NOT NULL,
                     input TEXT NOT NULL,
                     output_json TEXT,
                     response_type TEXT NOT NULL,
@@ -38,8 +39,8 @@ class Database:
                     created_at TEXT NOT NULL
                 );
 
-                CREATE INDEX IF NOT EXISTS ix_call_records_created_at
-                    ON call_records(created_at DESC);
+                CREATE INDEX IF NOT EXISTS ix_call_records_token_created_at
+                    ON call_records(token_hash, created_at DESC);
 
                 CREATE TABLE IF NOT EXISTS auth_tokens (
                     id TEXT PRIMARY KEY,

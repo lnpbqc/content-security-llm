@@ -25,12 +25,14 @@ class InferenceService:
     def available_types(self):
         return list_response_types()
 
-    def invoke(self, model_id: str, input: str, response_type: str) -> InvocationResult:
+    def invoke(self, model_id: str, input: str, response_type: str,
+               token_hash: str) -> InvocationResult:
         response_model = get_response_type(response_type)
         if response_model is None:
             raise UnknownResponseTypeError(response_type)
         parsed = self.manager.invoke(
-            model_id, input, response_model, response_type=response_type
+            model_id, input, response_model, response_type=response_type,
+            token_hash=token_hash,
         )
         return InvocationResult(
             model_id=model_id,

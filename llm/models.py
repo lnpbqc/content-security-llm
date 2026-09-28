@@ -88,19 +88,19 @@ class ModelManager:
         if not self.models.soft_delete(model_id):
             raise ModelNotFoundError(model_id)
 
-    def list_calls(self, *, limit: int, offset: int) -> List[CallRecord]:
-        return self.calls.list(limit=limit, offset=offset)
+    def list_calls(self, *, token_hash: str, limit: int, offset: int) -> List[CallRecord]:
+        return self.calls.list(token_hash=token_hash, limit=limit, offset=offset)
 
     def invoke(
         self, model_id: str, input: str, response_model: Type[T], *,
-        response_type: Optional[str] = None
+        response_type: Optional[str] = None, token_hash: str
     ) -> T:
         record = self.get_model(model_id)
         type_name = response_type or response_model.__name__
         try:
             api_key = self.cipher.decrypt(record.encrypted_api_key.encode("ascii")).decode("utf-8")
         except Exception as exc:
-            self._log_error(model_id, input, type_name, "credential_unavailable")
+            self._log_error(model_id, token_hash, input, type_name, "credential_unavailable")
             raise InvocationError("credential_unavailable", "Stored model credential cannot be read") from exc
 
         try:
@@ -128,35 +128,36 @@ class ModelManager:
                 raise InvocationError("empty_response", "Model returned no content")
             parsed = parse_model_output(content, response_model)
         except APITimeoutError as exc:
-            self._log_error(model_id, input, type_name, "provider_timeout")
+            self._log_error(model_id, token_hash, input, type_name, "provider_timeout")
             raise InvocationError("provider_timeout", "Model provider timed out", 504) from exc
         except APIConnectionError as exc:
-            self._log_error(model_id, input, type_name, "provider_unavailable")
+            self._log_error(model_id, token_hash, input, type_name, "provider_unavailable")
             raise InvocationError("provider_unavailable", "Model provider is unavailable") from exc
         except APIStatusError as exc:
-            self._log_error(model_id, input, type_name, "provider_error")
+            self._log_error(model_id, token_hash, input, type_name, "provider_error")
             raise InvocationError(
                 "provider_error", "Model provider returned an HTTP error",
                 upstream_status=exc.status_code,
             ) from exc
         except LengthFinishReasonError as exc:
-            self._log_error(model_id, input, type_name, "incomplete_response")
+            self._log_error(model_id, token_hash, input, type_name, "incomplete_response")
             raise InvocationError("incomplete_response", "Model response was incomplete") from exc
         except ContentFilterFinishReasonError as exc:
-            self._log_error(model_id, input, type_name, "model_refusal")
+            self._log_error(model_id, token_hash, input, type_name, "model_refusal")
             raise InvocationError("model_refusal", "Model response was blocked by content filtering") from exc
         except (ValidationError, ValueError, json.JSONDecodeError) as exc:
-            self._log_error(model_id, input, type_name, "invalid_structured_output")
+            self._log_error(model_id, token_hash, input, type_name, "invalid_structured_output")
             raise InvocationError("invalid_structured_output", "Model returned invalid structured output") from exc
         except OpenAIError as exc:
-            self._log_error(model_id, input, type_name, "provider_error")
+            self._log_error(model_id, token_hash, input, type_name, "provider_error")
             raise InvocationError("provider_error", "Model provider request failed") from exc
         except InvocationError as exc:
-            self._log_error(model_id, input, type_name, exc.code)
+            self._log_error(model_id, token_hash, input, type_name, exc.code)
             raise
 
         self.calls.create(
             model_id=model_id,
+            token_hash=token_hash,
             input=input,
             output_json=parsed.model_dump_json(),
             response_type=type_name,
@@ -164,9 +165,11 @@ class ModelManager:
         )
         return parsed
 
-    def _log_error(self, model_id: str, input: str, response_type: str, code: str) -> None:
+    def _log_error(self, model_id: str, token_hash: str, input: str,
+                   response_type: str, code: str) -> None:
         self.calls.create(
             model_id=model_id,
+            token_hash=token_hash,
             input=input,
             output_json=None,
             response_type=response_type,

@@ -22,9 +22,10 @@ def get_response_types(service: InferenceService = Depends(get_inference_service
 
 @router.post("/invoke", response_model=InvokeResponse)
 def invoke_model(payload: InvokeRequest,
-                 service: InferenceService = Depends(get_inference_service)) -> InvokeResponse:
+                 service: InferenceService = Depends(get_inference_service),
+                 token_hash: str = Depends(require_token)) -> InvokeResponse:
     try:
-        result = service.invoke(payload.model_id, payload.input, payload.response_type)
+        result = service.invoke(payload.model_id, payload.input, payload.response_type, token_hash)
     except UnknownResponseTypeError as exc:
         raise HTTPException(status_code=422, detail={"code": "unknown_response_type"}) from exc
     except ModelNotFoundError as exc:

@@ -56,8 +56,11 @@ class AuthService:
         return self.repository.set_all_enabled(enabled)
 
     def is_valid_token(self, token: str) -> bool:
+        return self.valid_token_hash(token) is not None
+
+    def valid_token_hash(self, token: str) -> Optional[str]:
         digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
         record = self.repository.get_by_hash(digest)
         if record is None or not record.enabled or record.expires_at <= utc_now():
-            return False
-        return hmac.compare_digest(record.token_hash, digest)
+            return None
+        return digest if hmac.compare_digest(record.token_hash, digest) else None

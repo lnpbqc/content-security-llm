@@ -16,5 +16,8 @@ router = APIRouter(prefix="/calls", tags=["calls"], dependencies=[Depends(requir
 @router.get("", response_model=List[CallPublic])
 def list_calls(limit: int = Query(default=50, ge=1, le=200),
                offset: int = Query(default=0, ge=0),
-               manager: ModelManager = Depends(get_model_manager)) -> List[CallPublic]:
-    return [CallPublic.from_record(record) for record in manager.list_calls(limit=limit, offset=offset)]
+               manager: ModelManager = Depends(get_model_manager),
+               token_hash: str = Depends(require_token)) -> List[CallPublic]:
+    return [CallPublic.from_record(record) for record in manager.list_calls(
+        token_hash=token_hash, limit=limit, offset=offset
+    )]

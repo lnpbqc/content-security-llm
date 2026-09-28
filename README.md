@@ -127,7 +127,35 @@ uv run fastapi dev main.py
 
 ### 结构化模型调用
 
-`GET /api/llm/response-types` 返回可选类型名数组，当前内置 `["judgement", "text_answer"]`。业务可在服务端定义 Pydantic `BaseModel` 类并用 `llm.outputs.register_response_type("类型名", 类)` 注册更多类型；客户端不能上传任意类或 Schema。
+`GET /api/llm/response-types` 返回可选类型名数组，当前内置类型如下：
+
+```json
+[
+  "anomaly_repair",
+  "full_chain_audit",
+  "judgement",
+  "model_risk_governance",
+  "reasoning_audit",
+  "semantic_risk",
+  "text_answer",
+  "value_score"
+]
+```
+
+内置类型对应的结果结构为：
+
+| 类型名 | 结果字段 |
+| --- | --- |
+| `text_answer` | `answer` |
+| `judgement` | `score`, `reason` |
+| `model_risk_governance` | `originalOutput`, `governedOutput`, `reason`, `riskLevel`, `reconstruction` |
+| `semantic_risk` | `findings[{category, level, reason}]`, `evidence[{quote, feature}]` |
+| `value_score` | `dimensions[{name, score, reason, evidence}]`, `tier`, `unavailableReason` |
+| `anomaly_repair` | `findings[{type, field, reason, quote}]`, `fieldChanges[{before, after}]` |
+| `full_chain_audit` | `conclusion` |
+| `reasoning_audit` | `steps[{description}]`, `riskNodes[{description}]`, `auditResult` |
+
+业务可在服务端定义 Pydantic `BaseModel` 类并用 `llm.outputs.register_response_type("类型名", 类)` 注册更多类型；客户端不能上传任意类或 Schema。
 
 `POST /api/llm/invoke` 的请求体三个字段均必填、非空：`model_id` 是上述本地 ID，`input` 是输入文本，`response_type` 是已注册的类型名。
 
@@ -153,7 +181,7 @@ uv run fastapi dev main.py
 
 ### 调用记录
 
-`GET /api/calls?limit=50&offset=0` 按时间从新到旧返回记录数组。`limit` 默认 `50`，允许 `1`～`200`；`offset` 默认 `0`，必须大于等于 `0`。参数无效返回 `422`。每条记录含 `id`、`model_id`、`input`、`output`、`response_type`、`status`、`error_code`、`created_at`；成功时 `status` 为 `success`、`output` 为结果对象、`error_code` 为 `null`，失败时 `status` 为 `error`、`output` 为 `null`、`error_code` 给出原因。即使模型已软删除，其历史记录仍会保留。
+`GET /api/calls?limit=50&offset=0` 只返回当前 Bearer 令牌产生的调用记录，按时间从新到旧排列。`limit` 默认 `50`，允许 `1`～`200`；`offset` 默认 `0`，必须大于等于 `0`，分页在按令牌过滤后进行。参数无效返回 `422`。每条记录含 `id`、`model_id`、`input`、`output`、`response_type`、`status`、`error_code`、`created_at`；成功时 `status` 为 `success`、`output` 为结果对象、`error_code` 为 `null`，失败时 `status` 为 `error`、`output` 为 `null`、`error_code` 给出原因。数据库保存令牌的 SHA-256 摘要以关联记录，但接口不会返回摘要。即使模型已软删除，其历史记录仍会保留。当前版本仅支持包含 `token_hash` 字段的新数据库结构，不再自动迁移旧结构。
 
 ```json
 [

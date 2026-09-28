@@ -28,6 +28,7 @@ def _call_from_row(row: sqlite3.Row) -> CallRecord:
     return CallRecord(
         id=row["id"],
         model_id=row["model_id"],
+        token_hash=row["token_hash"],
         input=row["input"],
         output_json=row["output_json"],
         response_type=row["response_type"],
@@ -105,25 +106,26 @@ class CallRepository:
     def __init__(self, database: Database):
         self.database = database
 
-    def create(self, *, model_id: str, input: str, output_json: Optional[str],
+    def create(self, *, model_id: str, token_hash: str, input: str, output_json: Optional[str],
                response_type: str, status: str, error_code: Optional[str] = None) -> CallRecord:
         call_id = str(uuid4())
         now = utc_now().isoformat()
         with self.database.connect() as connection:
             connection.execute(
                 """INSERT INTO call_records
-                   (id, model_id, input, output_json, response_type, status, error_code, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (call_id, model_id, input, output_json, response_type, status, error_code, now),
+                   (id, model_id, token_hash, input, output_json, response_type, status, error_code, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (call_id, model_id, token_hash, input, output_json, response_type, status, error_code, now),
             )
             row = connection.execute("SELECT * FROM call_records WHERE id = ?", (call_id,)).fetchone()
         return _call_from_row(row)
 
-    def list(self, *, limit: int, offset: int) -> List[CallRecord]:
+    def list(self, *, token_hash: str, limit: int, offset: int) -> List[CallRecord]:
         with self.database.connect() as connection:
             rows = connection.execute(
-                "SELECT * FROM call_records ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
-                (limit, offset),
+                "SELECT * FROM call_records WHERE token_hash = ? "
+                "ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
+                (token_hash, limit, offset),
             ).fetchall()
         return [_call_from_row(row) for row in rows]
 

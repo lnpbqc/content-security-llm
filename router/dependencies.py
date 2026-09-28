@@ -28,10 +28,12 @@ def get_inference_service(request: Request) -> InferenceService:
 def require_token(
     service: AuthService = Depends(get_auth_service),
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer),
-) -> None:
-    if credentials is None or not service.is_valid_token(credentials.credentials):
+) -> str:
+    token_hash = service.valid_token_hash(credentials.credentials) if credentials else None
+    if token_hash is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={"code": "invalid_token", "message": "Missing, invalid, disabled, or expired token"},
             headers={"WWW-Authenticate": "Bearer"},
         )
+    return token_hash

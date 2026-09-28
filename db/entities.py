@@ -22,6 +22,7 @@ class ModelRecord:
 class CallRecord:
     id: str
     model_id: str
+    token_hash: str
     input: str
     output_json: Optional[str]
     response_type: str
