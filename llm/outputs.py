@@ -10,8 +10,18 @@ class TextAnswer(BaseModel):
 
     answer: str
 
+class JudgementAnswer(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
-_response_types: Dict[str, Type[BaseModel]] = {"text_answer": TextAnswer}
+    score: float
+
+    reason: str
+
+
+_response_types: Dict[str, Type[BaseModel]] = {
+    "text_answer": TextAnswer,
+    "judgement": JudgementAnswer
+}
 
 
 def register_response_type(name: str, response_model: Type[BaseModel]) -> None:

@@ -140,7 +140,7 @@ uv run fastapi dev main.py
 }
 ```
 
-服务先把上游输出解析为对应的 Pydantic 实例，再将 `result` 序列化为 JSON。上游必须支持 JSON Schema 结构化输出；通用接口不会自动执行 `llm/tools.py` 中的工具，业务代码可通过 `get_all_tools()` 获取它们。未知 `response_type` 返回 `422`，模型不存在返回 `404`，上游超时返回 `504`，上游拒绝、格式不符或其他调用失败返回 `502`。成功和上游调用失败均会写入调用记录；未知类型和不存在的模型不会生成记录。
+服务调用 OpenAI 兼容的 Chat Completions `create()`，在 system 消息中提供服务端 Pydantic 类生成的 JSON Schema，要求上游只返回符合它的 JSON 对象；不会向上游发送 `response_format=json_schema`。收到文本后，服务端再用 Pydantic 解析、校验为 Python 类实例，并将 `result` 序列化为 JSON。提示词无法保证上游一定遵守 Schema；空响应、截断或校验失败会返回错误，不会把无效结果交给业务代码。通用接口不会自动执行 `llm/tools.py` 中的工具，业务代码可通过 `get_all_tools()` 获取它们。未知 `response_type` 返回 `422`，模型不存在返回 `404`，上游超时返回 `504`，上游拒绝、格式不符或其他调用失败返回 `502`。成功和上游调用失败均会写入调用记录；未知类型和不存在的模型不会生成记录。
 
 ### 调用记录
 
@@ -171,10 +171,12 @@ uv run fastapi dev main.py
 | `403` | `invalid_setup_secret` | 创建令牌时缺少或填错 `X-Setup-Secret`。 |
 | `404` | `model_not_found` | 本地模型 ID 不存在或模型已软删除。 |
 | `422` | `null_model_field`、`unknown_response_type` | 修改模型时将非空字段设为 `null`，或调用了未注册的结果类型。 |
-| `502` | `credential_unavailable`、`empty_response`、`model_refusal`、`invalid_structured_output`、`structured_output_unsupported`、`provider_unavailable`、`provider_error`、`incomplete_response` | 模型密钥不可解密，或上游服务未能给出可用的结构化结果。 |
+| `502` | `credential_unavailable`、`empty_response`、`model_refusal`、`invalid_structured_output`、`provider_unavailable`、`provider_error`、`incomplete_response` | 模型密钥不可解密，或上游服务未能给出可用的结构化结果。 |
 | `504` | `provider_timeout` | 上游模型请求超时。 |
 
-例如令牌错误会返回 `{"detail":{"code":"invalid_token","message":"Missing, invalid, or expired token"}}`；模型不存在会返回 `{"detail":{"code":"model_not_found","model_id":"..."}}`。添加模型只保存配置，不会预先测试上游服务连通性；首次调用时才会发现上游地址、密钥或结构化输出支持方面的问题。
+例如令牌错误会返回 `{"detail":{"code":"invalid_token","message":"Missing, invalid, or expired token"}}`；模型不存在会返回 `{"detail":{"code":"model_not_found","model_id":"..."}}`。添加模型只保存配置，不会预先测试上游服务连通性；首次调用时才会发现上游地址、密钥或输出格式方面的问题。
+
+上游返回 HTTP 错误时，本服务仍返回 `502`，但 `detail` 会附带 `upstream_status`（例如 `401`、`402`、`429`），便于区分鉴权、余额或限流等情况；不会向前端透传上游原始错误正文。上游 HTTP 错误统一使用 `provider_error`，本地 Pydantic 解析或校验失败使用 `invalid_structured_output`。
 
 ## 注意事项
 

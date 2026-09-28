@@ -17,6 +17,7 @@ from pydantic import BaseModel, ValidationError
 from db.database import Database
 from db.entities import CallRecord, ModelRecord
 from db.repositories import CallRepository, ModelRepository
+from llm.structured_output import parse_model_output, schema_system_prompt
 
 
 T = TypeVar("T", bound=BaseModel)
@@ -27,10 +28,12 @@ class ModelNotFoundError(Exception):
 
 
 class InvocationError(Exception):
-    def __init__(self, code: str, message: str, status_code: int = 502):
+    def __init__(self, code: str, message: str, status_code: int = 502,
+                 *, upstream_status: Optional[int] = None):
         super().__init__(message)
         self.code = code
         self.status_code = status_code
+        self.upstream_status = upstream_status
 
 
 class ModelManager:
@@ -102,21 +105,28 @@ class ModelManager:
 
         try:
             client = self.client_factory(api_key=api_key, base_url=record.base_url)
-            completion = client.chat.completions.parse(
+            completion = client.chat.completions.create(
                 model=record.upstream_model_id,
-                messages=[{"role": "user", "content": input}],
-                response_format=response_model,
+                messages=[
+                    {"role": "system", "content": schema_system_prompt(response_model)},
+                    {"role": "user", "content": input},
+                ],
             )
             if not completion.choices:
                 raise InvocationError("empty_response", "Model returned no choices")
-            message = completion.choices[0].message
+            choice = completion.choices[0]
+            if getattr(choice, "finish_reason", None) == "length":
+                raise InvocationError("incomplete_response", "Model response was incomplete")
+            if getattr(choice, "finish_reason", None) == "content_filter":
+                raise InvocationError("model_refusal", "Model response was blocked by content filtering")
+            message = choice.message
             if getattr(message, "refusal", None):
                 raise InvocationError("model_refusal", "Model refused to provide a structured response")
-            parsed = getattr(message, "parsed", None)
-            if parsed is None:
-                raise InvocationError("invalid_structured_output", "Model returned no parsed object")
-            if not isinstance(parsed, response_model):
-                parsed = response_model.model_validate(parsed)
+            print(message)
+            content = getattr(message, "content", None)
+            if not content:
+                raise InvocationError("empty_response", "Model returned no content")
+            parsed = parse_model_output(content, response_model)
         except APITimeoutError as exc:
             self._log_error(model_id, input, type_name, "provider_timeout")
             raise InvocationError("provider_timeout", "Model provider timed out", 504) from exc
@@ -124,9 +134,11 @@ class ModelManager:
             self._log_error(model_id, input, type_name, "provider_unavailable")
             raise InvocationError("provider_unavailable", "Model provider is unavailable") from exc
         except APIStatusError as exc:
-            code = "structured_output_unsupported" if self._is_schema_error(exc) else "provider_error"
-            self._log_error(model_id, input, type_name, code)
-            raise InvocationError(code, "Model provider rejected the structured request") from exc
+            self._log_error(model_id, input, type_name, "provider_error")
+            raise InvocationError(
+                "provider_error", "Model provider returned an HTTP error",
+                upstream_status=exc.status_code,
+            ) from exc
         except LengthFinishReasonError as exc:
             self._log_error(model_id, input, type_name, "incomplete_response")
             raise InvocationError("incomplete_response", "Model response was incomplete") from exc
@@ -161,10 +173,3 @@ class ModelManager:
             status="error",
             error_code=code,
         )
-
-    @staticmethod
-    def _is_schema_error(error: APIStatusError) -> bool:
-        if error.status_code != 400:
-            return False
-        details = str(error).lower()
-        return "response_format" in details or "json_schema" in details or "structured output" in details

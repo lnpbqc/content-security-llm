@@ -30,9 +30,12 @@ def invoke_model(payload: InvokeRequest,
     except ModelNotFoundError as exc:
         raise model_not_found(exc) from exc
     except InvocationError as exc:
+        detail = {"code": exc.code, "message": str(exc)}
+        if exc.upstream_status is not None:
+            detail["upstream_status"] = exc.upstream_status
         raise HTTPException(
             status_code=exc.status_code,
-            detail={"code": exc.code, "message": str(exc)},
+            detail=detail,
         ) from exc
     return InvokeResponse(
         model_id=result.model_id,
