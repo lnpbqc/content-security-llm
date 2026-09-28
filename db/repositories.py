@@ -132,29 +132,56 @@ class AuthRepository:
     def __init__(self, database: Database):
         self.database = database
 
-    def replace(self, token_hash: str, expires_at: datetime) -> AuthRecord:
+    def create(self, token_hash: str, expires_at: datetime) -> AuthRecord:
+        token_id = str(uuid4())
         now = utc_now().isoformat()
         with self.database.connect() as connection:
             connection.execute(
-                """INSERT INTO auth_token (id, token_hash, created_at, expires_at)
-                   VALUES (1, ?, ?, ?)
-                   ON CONFLICT(id) DO UPDATE SET
-                     token_hash = excluded.token_hash,
-                     created_at = excluded.created_at,
-                     expires_at = excluded.expires_at""",
-                (token_hash, now, expires_at.isoformat()),
+                """INSERT INTO auth_tokens (id, token_hash, created_at, expires_at, enabled)
+                   VALUES (?, ?, ?, ?, 1)""",
+                (token_id, token_hash, now, expires_at.isoformat()),
             )
-        record = self.get()
+        record = self.get(token_id)
         assert record is not None
         return record
 
-    def get(self) -> Optional[AuthRecord]:
+    def set_enabled(self, token_hash: str, enabled: bool) -> Optional[AuthRecord]:
         with self.database.connect() as connection:
-            row = connection.execute("SELECT * FROM auth_token WHERE id = 1").fetchone()
-        if row is None:
-            return None
+            cursor = connection.execute(
+                "UPDATE auth_tokens SET enabled = ? WHERE token_hash = ?",
+                (int(enabled), token_hash),
+            )
+            if cursor.rowcount == 0:
+                return None
+        return self.get_by_hash(token_hash)
+
+    def set_all_enabled(self, enabled: bool) -> int:
+        with self.database.connect() as connection:
+            cursor = connection.execute(
+                "UPDATE auth_tokens SET enabled = ?", (int(enabled),)
+            )
+            return cursor.rowcount
+
+    def get(self, token_id: str) -> Optional[AuthRecord]:
+        with self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM auth_tokens WHERE id = ?", (token_id,)
+            ).fetchone()
+        return self._from_row(row) if row is not None else None
+
+    def get_by_hash(self, token_hash: str) -> Optional[AuthRecord]:
+        with self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM auth_tokens WHERE token_hash = ?", (token_hash,)
+            ).fetchone()
+        return self._from_row(row) if row is not None else None
+
+    @staticmethod
+    def _from_row(row: sqlite3.Row) -> AuthRecord:
         return AuthRecord(
+            id=row["id"],
             token_hash=row["token_hash"],
             created_at=datetime.fromisoformat(row["created_at"]),
             expires_at=datetime.fromisoformat(row["expires_at"]),
+            enabled=bool(row["enabled"]),
         )

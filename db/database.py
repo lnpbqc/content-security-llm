@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
+
 class Database:
     def __init__(self, path: Path):
         self.path = Path(path)
@@ -40,11 +41,12 @@ class Database:
                 CREATE INDEX IF NOT EXISTS ix_call_records_created_at
                     ON call_records(created_at DESC);
 
-                CREATE TABLE IF NOT EXISTS auth_token (
-                    id INTEGER PRIMARY KEY CHECK (id = 1),
-                    token_hash TEXT NOT NULL,
+                CREATE TABLE IF NOT EXISTS auth_tokens (
+                    id TEXT PRIMARY KEY,
+                    token_hash TEXT NOT NULL UNIQUE,
                     created_at TEXT NOT NULL,
-                    expires_at TEXT NOT NULL
+                    expires_at TEXT NOT NULL,
+                    enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1))
                 );
                 """
             )

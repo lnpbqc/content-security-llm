@@ -1,4 +1,4 @@
-"""Schemas for shared-token initialization."""
+"""Schemas for token creation and administration."""
 
 from datetime import datetime, timezone
 
@@ -22,10 +22,28 @@ class TokenCreate(BaseModel):
         return value.astimezone(timezone.utc)
 
 
+class TokenStatusUpdate(BaseModel):
+    enabled: bool
+
+
+class SpecificTokenStatusUpdate(TokenStatusUpdate):
+    token: str = Field(min_length=32)
+
+
 class TokenPublic(BaseModel):
     created_at: datetime
     expires_at: datetime
+    enabled: bool
 
     @classmethod
     def from_record(cls, record: AuthRecord) -> "TokenPublic":
-        return cls(created_at=record.created_at, expires_at=record.expires_at)
+        return cls(
+            created_at=record.created_at,
+            expires_at=record.expires_at,
+            enabled=record.enabled,
+        )
+
+
+class TokenBulkStatus(BaseModel):
+    enabled: bool
+    updated_count: int

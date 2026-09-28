@@ -1,18 +1,18 @@
 # Content Security LLM
 
-这是一个 FastAPI 服务：在 SQLite 中管理模型配置、共享访问令牌和模型调用记录，通过 OpenAI 兼容接口调用模型，并把输出解析为服务端定义的 Pydantic 对象。
+这是一个 FastAPI 服务：在 SQLite 中管理模型配置、访问令牌和模型调用记录，通过 OpenAI 兼容接口调用模型，并把输出解析为服务端定义的 Pydantic 对象。
 
 ## 配置文件说明
 
-仓库中的 `settings.example.json` 只是模板，程序不会读取它。复制成项目根目录的 `settings.local.json` 并替换占位值后，程序才会读取该文件：
+仓库中的 `settings.example.json` 只是模板。复制成项目根目录的 `settings.local.json` 并替换占位值后，程序才会读取该文件：
 
 | 字段 | 作用 | 要填什么 |
 | --- | --- | --- |
-| `setup_secret` | 管理员初始化密钥。调用 `POST /api/auth/token` 时放在 `X-Setup-Secret` 请求头，用来创建或替换前端使用的共享令牌。 | 至少 32 个字符的随机字符串；只保存在服务端。 |
+| `setup_secret` | 管理员初始化密钥。创建令牌及启用、禁用令牌时放在 `X-Setup-Secret` 请求头。 | 至少 32 个字符的随机字符串；只保存在服务端。 |
 | `credential_key` | 本服务加密、解密 SQLite 中模型 `api_key` 的密钥。它**不参与前端鉴权**，也不是模型服务的 API Key。 | 一次生成的 Fernet 密钥；重启时必须保持不变。 |
 | `database_path` | SQLite 数据库文件的位置；首次启动时自动创建。 | 默认 `db/app.sqlite3` 即可；相对路径按配置文件所在目录解析。 |
 
-这几个值不要混用：`setup_secret` 负责签发共享令牌；共享令牌由 `POST /api/auth/token` 的请求体提供，供前端调用本服务；添加模型时提交的 `api_key` 则用于调用上游模型服务，由 `credential_key` 加密保存。
+这几个值不要混用：`setup_secret` 负责签发与管理访问令牌；访问令牌由 `POST /api/auth/token` 的请求体提供，供调用者访问本服务；添加模型时提交的 `api_key` 则用于调用上游模型服务，由 `credential_key` 加密保存。
 
 ## 本地启动
 
@@ -42,13 +42,15 @@ uv run fastapi dev main.py
 
 ## 接口说明
 
-本地服务地址为 `http://127.0.0.1:8000`，请求体和响应体均为 JSON（`204` 响应没有响应体）。`GET /` 无需鉴权，返回 `{"message":"Content Security LLM"}`。`POST /api/auth/token` 使用 `X-Setup-Secret`；其余 `/api` 接口都需要 `Authorization: Bearer <共享令牌>`。可在 `/docs` 中交互式调用。
+本地服务地址为 `http://127.0.0.1:8000`，请求体和响应体均为 JSON（`204` 响应没有响应体）。`GET /` 无需鉴权，返回 `{"message":"Content Security LLM"}`。`/api/auth/token` 下的令牌创建与状态接口使用 `X-Setup-Secret`；其余 `/api` 接口都需要 `Authorization: Bearer <访问令牌>`。可在 `/docs` 中交互式调用。
 
-推荐调用顺序：创建共享令牌 → 添加模型 → 查询可用结果类型 → 调用模型 → 查询调用记录。时间字段为带时区的 ISO 8601 字符串，下面示例均使用 UTC。
+推荐调用顺序：创建访问令牌 → 添加模型 → 查询可用结果类型 → 调用模型 → 查询调用记录。时间字段为带时区的 ISO 8601 字符串，下面示例均使用 UTC。
 
 | 方法与路径 | 用途 | 成功状态 |
 | --- | --- | --- |
-| `POST /api/auth/token` | 创建或替换共享令牌 | `201` |
+| `POST /api/auth/token` | 创建一枚访问令牌 | `201` |
+| `PATCH /api/auth/token/status` | 启用或禁用指定令牌 | `200` |
+| `PATCH /api/auth/tokens/status` | 启用或禁用当前全部令牌 | `200` |
 | `POST /api/models` | 添加模型配置 | `201` |
 | `GET /api/models` | 列出未删除的模型 | `200` |
 | `GET /api/models/{model_id}` | 查询一个模型 | `200` |
@@ -58,7 +60,7 @@ uv run fastapi dev main.py
 | `POST /api/llm/invoke` | 调用模型并返回结构化结果 | `200` |
 | `GET /api/calls` | 分页查询调用记录 | `200` |
 
-### 创建或替换共享令牌
+### 创建与管理访问令牌
 
 `POST /api/auth/token` 不使用 Bearer 令牌。请求头 `X-Setup-Secret` 必须与配置文件中的 `setup_secret` 一致。请求体：
 
@@ -74,7 +76,14 @@ uv run fastapi dev main.py
 }
 ```
 
-成功时返回 `{"created_at":"2026-09-28T10:00:00Z","expires_at":"2030-12-31T00:00:00Z"}`。服务只保存令牌摘要，不生成或返回令牌原文；请保存自己提交的值。再次调用会替换唯一的共享令牌，旧令牌立即失效。缺少或填错 `X-Setup-Secret` 返回 `403`，令牌太短或过期时间无效返回 `422`。共享令牌过期后仍可用初始化密钥创建新令牌。
+成功时返回 `{"created_at":"2026-09-28T10:00:00Z","expires_at":"2030-12-31T00:00:00Z","enabled":true}`。每次调用都会新增一枚独立令牌，不会替换已有令牌。服务只保存令牌摘要，不生成或返回令牌原文；请自行妥善保存提交的令牌原文。相同令牌不能重复创建，重复时返回 `409 token_already_exists`。缺少或填错 `X-Setup-Secret` 返回 `403`，令牌太短或过期时间无效返回 `422`。令牌过期后仍可用初始化密钥创建新令牌。
+
+两个状态接口都使用 `X-Setup-Secret`，**不需要 Bearer 令牌**：
+
+- `PATCH /api/auth/token/status` 请求体为 `{"token":"令牌原文","enabled":false}`（启用时设为 `true`），只修改该令牌，返回 `created_at`、`expires_at` 和最新 `enabled`；令牌不存在返回 `404 token_not_found`。
+- `PATCH /api/auth/tokens/status` 请求体为 `{"enabled":false}`（启用时设为 `true`），修改**当前已创建的全部令牌**，返回 `{"enabled":false,"updated_count":2}`；没有令牌时 `updated_count` 为 `0`。之后新建的令牌仍默认启用。
+
+被禁用的令牌访问其他接口会收到 `401 invalid_token`；重新启用后，只有尚未过期的令牌能恢复使用。缺少或填错初始化密钥返回 `403 invalid_setup_secret`。数据库中的 `id` 仅供内部使用，接口通过令牌原文定位单个令牌。
 
 ### 模型配置
 
@@ -118,7 +127,7 @@ uv run fastapi dev main.py
 
 ### 结构化模型调用
 
-`GET /api/llm/response-types` 返回可选类型名数组，初始为 `["text_answer"]`。业务可在服务端定义 Pydantic `BaseModel` 类并用 `llm.outputs.register_response_type("类型名", 类)` 注册更多类型；客户端不能上传任意类或 Schema。
+`GET /api/llm/response-types` 返回可选类型名数组，当前内置 `["judgement", "text_answer"]`。业务可在服务端定义 Pydantic `BaseModel` 类并用 `llm.outputs.register_response_type("类型名", 类)` 注册更多类型；客户端不能上传任意类或 Schema。
 
 `POST /api/llm/invoke` 的请求体三个字段均必填、非空：`model_id` 是上述本地 ID，`input` 是输入文本，`response_type` 是已注册的类型名。
 
@@ -167,14 +176,15 @@ uv run fastapi dev main.py
 
 | HTTP 状态 | `detail.code` | 含义 |
 | --- | --- | --- |
-| `401` | `invalid_token` | Bearer 令牌缺失、错误或过期。 |
-| `403` | `invalid_setup_secret` | 创建令牌时缺少或填错 `X-Setup-Secret`。 |
-| `404` | `model_not_found` | 本地模型 ID 不存在或模型已软删除。 |
+| `401` | `invalid_token` | Bearer 令牌缺失、错误、被禁用或过期。 |
+| `403` | `invalid_setup_secret` | 创建或管理令牌时缺少或填错 `X-Setup-Secret`。 |
+| `404` | `model_not_found`、`token_not_found` | 本地模型 ID 不存在或模型已软删除；或指定的令牌 ID 不存在。 |
+| `409` | `token_already_exists` | 相同令牌已经创建。 |
 | `422` | `null_model_field`、`unknown_response_type` | 修改模型时将非空字段设为 `null`，或调用了未注册的结果类型。 |
 | `502` | `credential_unavailable`、`empty_response`、`model_refusal`、`invalid_structured_output`、`provider_unavailable`、`provider_error`、`incomplete_response` | 模型密钥不可解密，或上游服务未能给出可用的结构化结果。 |
 | `504` | `provider_timeout` | 上游模型请求超时。 |
 
-例如令牌错误会返回 `{"detail":{"code":"invalid_token","message":"Missing, invalid, or expired token"}}`；模型不存在会返回 `{"detail":{"code":"model_not_found","model_id":"..."}}`。添加模型只保存配置，不会预先测试上游服务连通性；首次调用时才会发现上游地址、密钥或输出格式方面的问题。
+例如令牌错误会返回 `{"detail":{"code":"invalid_token","message":"Missing, invalid, disabled, or expired token"}}`；模型不存在会返回 `{"detail":{"code":"model_not_found","model_id":"..."}}`。添加模型只保存配置，不会预先测试上游服务连通性；首次调用时才会发现上游地址、密钥或输出格式方面的问题。
 
 上游返回 HTTP 错误时，本服务仍返回 `502`，但 `detail` 会附带 `upstream_status`（例如 `401`、`402`、`429`），便于区分鉴权、余额或限流等情况；不会向前端透传上游原始错误正文。上游 HTTP 错误统一使用 `provider_error`，本地 Pydantic 解析或校验失败使用 `invalid_structured_output`。
 
@@ -183,7 +193,7 @@ uv run fastapi dev main.py
 - `settings.local.json` 和默认 SQLite 文件已加入 `.gitignore`；若改用其他路径，也要确保配置与数据库文件不会被提交或公开。
 - `credential_key` 用于加密模型 API Key。重启或迁移时必须沿用同一个值；丢失后，数据库中已有的模型密钥无法解密。模型查询接口不会返回 API Key。
 - SQLite 中的调用输入、输出是明文，可能包含敏感内容。应限制数据库文件和 `GET /api/calls` 的访问，并按需制定备份与保留期限。
-- 当前只有一个共享令牌；持有它的人可以调用模型，也可以管理模型和查看调用记录。对外部署时应使用 HTTPS，并将初始化密钥留在服务端。
+- 可创建多枚访问令牌；持有任一有效令牌的人都可以调用模型、管理模型和查看调用记录。只有持有初始化密钥的人能创建、启用或禁用令牌。对外部署时应使用 HTTPS，并将初始化密钥留在服务端。
 
 代码职责：`router/` 处理 HTTP，`schemas/` 定义接口数据结构，`service/` 编排业务流程，`llm/` 管理模型调用与工具，`db/` 管理 SQLite，通用时间函数在 `utils/time.py`。
 

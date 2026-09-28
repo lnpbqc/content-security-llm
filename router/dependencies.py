@@ -32,6 +32,6 @@ def require_token(
     if credentials is None or not service.is_valid_token(credentials.credentials):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail={"code": "invalid_token", "message": "Missing, invalid, or expired token"},
+            detail={"code": "invalid_token", "message": "Missing, invalid, disabled, or expired token"},
             headers={"WWW-Authenticate": "Bearer"},
         )

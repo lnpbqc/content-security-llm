@@ -32,6 +32,8 @@ class CallRecord:
 
 @dataclass(frozen=True)
 class AuthRecord:
+    id: str
     token_hash: str
     created_at: datetime
     expires_at: datetime
+    enabled: bool
