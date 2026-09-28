@@ -1,0 +1,5 @@
+{
+  "setup_secret": "REPLACE_WITH_A_RANDOM_SECRET_AT_LEAST_32_CHARS",
+  "credential_key": "REPLACE_WITH_A_GENERATED_FERNET_KEY",
+  "database_path": "db/app.sqlite3"
+}

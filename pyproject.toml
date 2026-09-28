@@ -1,0 +1,16 @@
+[project]
+name = "content-security-llm"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "cryptography>=40,<41",
+    "fastapi[standard]>=0.128.8",
+    "langchain-core>=0.3.86",
+    "langgraph>=0.6.11",
+    "openai>=1.55",
+]
+
+[dependency-groups]
+dev = ["pytest>=8"]
