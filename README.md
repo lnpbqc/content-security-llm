@@ -148,12 +148,12 @@ uv run fastapi dev main.py
 | --- | --- |
 | `text_answer` | `answer` |
 | `judgement` | `score`, `reason` |
-| `model_risk_governance` | `originalOutput`, `governedOutput`, `reason`, `riskLevel`, `reconstruction` |
-| `semantic_risk` | `findings[{category, level, reason}]`, `evidence[{quote, feature}]` |
-| `value_score` | `dimensions[{name, score, reason, evidence}]`, `tier`, `unavailableReason` |
-| `anomaly_repair` | `findings[{type, field, reason, quote}]`, `fieldChanges[{before, after}]` |
-| `full_chain_audit` | `conclusion` |
-| `reasoning_audit` | `steps[{description}]`, `riskNodes[{description}]`, `auditResult` |
+| `model_risk_governance` | `originalOutput`, `governedOutput`, `reason`, `riskLevel`, `reconstruction`（可为 `null`） |
+| `semantic_risk` | `findings[{category, suggestedLevel, reason, ruleId, evidenceRefs}]`, `evidence[{quote, feature}]`, `primaryCategory`, `maximumSuggestedLevel` |
+| `value_score` | `dimensions` 必须恰好包含文化价值、信息价值、稀缺性、可信度、代表性五个维度；每项包含 `name`, `score`, `reason`, `evidence`，另有 `tier`, `unavailableReason` |
+| `anomaly_repair` | `findings[{type, field, reason, quote, ruleId}]`, `primaryType`, `source{filename, line}`, `fieldChanges[{field, before, after}]`, `reason`, `validationResults[{name, passed}]` |
+| `full_chain_audit` | `conclusion`, `checks[{stage, passed, reason}]`, `gaps[{description, reason}]` |
+| `reasoning_audit` | `steps[{label, detail, occurredAt, verificationState}]`, `riskNodes[{stepId, ruleRef, description, evidenceRefs}]`, `auditResult` |
 
 业务可在服务端定义 Pydantic `BaseModel` 类并用 `llm.outputs.register_response_type("类型名", 类)` 注册更多类型；客户端不能上传任意类或 Schema。
 

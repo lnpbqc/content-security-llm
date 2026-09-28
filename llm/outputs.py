@@ -1,8 +1,8 @@
 """Server-owned Pydantic result types available to HTTP callers."""
 
-from typing import Dict, List, Optional, Type
+from typing import Dict, List, Literal, Optional, Type
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class TextAnswer(BaseModel):
@@ -23,16 +23,18 @@ class ModelRiskGovernanceOutput(BaseModel):
     originalOutput: str
     governedOutput: str
     reason: str
-    riskLevel: str
-    reconstruction: str
+    riskLevel: Literal["high", "medium", "low"]
+    reconstruction: Optional[str] = None
 
 
 class SemanticRiskFinding(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    category: str
-    level: str
+    category: Literal["个人信息暴露", "误导信息", "仇恨歧视", "违法有害"]
+    suggestedLevel: Literal["HIGH", "MEDIUM", "LOW", "NOTICE"]
     reason: str
+    ruleId: str
+    evidenceRefs: List[str]
 
 
 class SemanticRiskEvidence(BaseModel):
@@ -47,64 +49,117 @@ class SemanticRiskOutput(BaseModel):
 
     findings: List[SemanticRiskFinding]
     evidence: List[SemanticRiskEvidence]
+    primaryCategory: str
+    maximumSuggestedLevel: Literal["HIGH", "MEDIUM", "LOW", "NOTICE"]
 
 
 class ValueScoreDimension(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    name: str
-    score: float
+    name: Literal["文化价值", "信息价值", "稀缺性", "可信度", "代表性"]
+    score: Optional[float] = Field(default=None, ge=0, le=100)
     reason: str
-    evidence: str
+    evidence: List[str]
 
 
 class ValueScoreOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    dimensions: List[ValueScoreDimension]
+    dimensions: List[ValueScoreDimension] = Field(min_length=5, max_length=5)
     tier: str
     unavailableReason: Optional[str] = None
+
+    @model_validator(mode="after")
+    def validate_dimensions(self) -> "ValueScoreOutput":
+        expected = {"文化价值", "信息价值", "稀缺性", "可信度", "代表性"}
+        actual = {dimension.name for dimension in self.dimensions}
+        if actual != expected:
+            raise ValueError("dimensions must contain exactly the five required value dimensions")
+        return self
 
 
 class AnomalyFinding(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    type: str
+    type: Literal["标签异常", "重复记录", "格式异常", "字段缺失"]
     field: str
     reason: str
     quote: str
+    ruleId: str
+
+
+class AnomalySource(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    filename: str
+    line: int
 
 
 class FieldChange(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    field: str
     before: str
     after: str
+
+
+class ValidationResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    passed: bool
 
 
 class AnomalyRepairOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     findings: List[AnomalyFinding]
+    primaryType: str
+    source: AnomalySource
     fieldChanges: List[FieldChange]
+    reason: str
+    validationResults: List[ValidationResult]
+
+
+class FullChainCheck(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    stage: str
+    passed: bool
+    reason: str
+
+
+class FullChainGap(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    description: str
+    reason: str
 
 
 class FullChainAuditOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     conclusion: str
+    checks: List[FullChainCheck]
+    gaps: List[FullChainGap]
 
 
 class ReasoningStep(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    description: str
+    label: str
+    detail: str
+    occurredAt: str
+    verificationState: str
 
 
 class RiskNode(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    stepId: str
+    ruleRef: str
     description: str
+    evidenceRefs: List[str]
 
 
 class ReasoningAuditOutput(BaseModel):
