@@ -1,0 +1,177 @@
+### 手动接口测试流程（VS Code REST Client）
+# 先启动服务，并在项目根目录配置 settings.local.json。
+# 将下面的占位值替换为自己的配置。不要把真实密钥提交到 Git。
+# 按顺序单独发送请求；后续请求会读取「创建模型」响应里的 model_id。
+# expiresAt 必须是未来的、带时区的时间。令牌至少 32 个字符。
+# 每次创建会增加一枚独立令牌；最后一步会软删除本流程创建的模型。
+# 管理员用 X-Setup-Secret 可切换指定令牌或全部现有令牌的状态。
+
+@baseUrl = http://127.0.0.1:8000
+@setupSecret = 
+@token = OrWYnmMnLdKWpZqtdjr-YU6r3h1JDVZ-ZH9otJblGjg=
+@expiresAt = 2035-12-31T00:00:00Z
+@token2 = staypositiveandmakeeverydaycount
+# @upstreamBaseUrl = https://api.tiantoken.com
+# @upstreamModelId = deepseek-r1
+# @upstreamApiKey = sk-GEuAwGQZbKiMoKuJNka3LjFuSWnZyBnAgu5dYETwv5ZKIrDY
+@upstreamBaseUrl = https://api.deepseek.com
+@upstreamModelId = deepseek-flash
+@upstreamApiKey = 
+
+### 1. 健康检查：预期 200，不需要鉴权
+GET {{baseUrl}}/
+
+### 2. 创建第一枚令牌：预期 201，响应包含 enabled 和过期时间
+# @name createToken
+POST {{baseUrl}}/api/auth/token
+Content-Type: application/json
+X-Setup-Secret: {{setupSecret}}
+
+{
+  "token": "{{token}}",
+  "expires_at": "{{expiresAt}}"
+}
+
+### 2a. 创建第二枚令牌：预期 201，与第一枚独立
+# @name createToken2
+POST {{baseUrl}}/api/auth/token
+Content-Type: application/json
+X-Setup-Secret: {{setupSecret}}
+
+{
+  "token": "{{token2}}",
+  "expires_at": "{{expiresAt}}"
+}
+
+### 2b. 只禁用第一枚：预期 200，响应 enabled=false
+PATCH {{baseUrl}}/api/auth/token/status
+Content-Type: application/json
+X-Setup-Secret: {{setupSecret}}
+
+{
+  "token": "{{token}}",
+  "enabled": false
+}
+
+### 2c. 第一枚被禁用：预期 401
+GET {{baseUrl}}/api/models
+Authorization: Bearer {{token}}
+
+### 2d. 第二枚仍可访问：预期 200
+GET {{baseUrl}}/api/models
+Authorization: Bearer {{token2}}
+
+### 2e. 重新启用第一枚：预期 200，响应 enabled=true
+PATCH {{baseUrl}}/api/auth/token/status
+Content-Type: application/json
+X-Setup-Secret: {{setupSecret}}
+
+{
+  "token": "{{token}}",
+  "enabled": true
+}
+
+### 2f. 禁用全部现有令牌：预期 200，updated_count 至少为 2
+PATCH {{baseUrl}}/api/auth/tokens/status
+Content-Type: application/json
+X-Setup-Secret: {{setupSecret}}
+
+{
+  "enabled": false
+}
+
+### 2g. 第二枚也被禁用：预期 401
+GET {{baseUrl}}/api/models
+Authorization: Bearer {{token2}}
+
+### 2h. 重新启用全部现有令牌：预期 200
+PATCH {{baseUrl}}/api/auth/tokens/status
+Content-Type: application/json
+X-Setup-Secret: {{setupSecret}}
+
+{
+  "enabled": true
+}
+
+### 2i. 确认第一枚恢复访问：预期 200
+GET {{baseUrl}}/api/models
+Authorization: Bearer {{token}}
+
+### 3. 添加模型：预期 201，响应包含本地 model_id，但不回显 api_key
+# @name createModel
+POST {{baseUrl}}/api/models
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "upstream_model_id": "{{upstreamModelId}}",
+  "name": "HTTP 测试模型",
+  "description": "用于按顺序验证接口",
+  "base_url": "{{upstreamBaseUrl}}",
+  "api_key": "{{upstreamApiKey}}"
+}
+
+### 4. 列出模型：预期 200，数组中包含刚添加的模型
+GET {{baseUrl}}/api/models
+Authorization: Bearer {{token}}
+
+### 5. 按本地 ID 查询模型：预期 200
+GET {{baseUrl}}/api/models/{{createModel.response.body.$.model_id}}
+Authorization: Bearer {{token}}
+
+### 6. 修改模型：预期 200，name 和 updated_at 更新
+PATCH {{baseUrl}}/api/models/{{createModel.response.body.$.model_id}}
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "name": "deepseek-r1"
+}
+
+### 7. 查询结构化结果类型：预期 200，包含 text_answer 和 judgement
+GET {{baseUrl}}/api/llm/response-types
+Authorization: Bearer {{token}}
+
+### 8. 调用模型：上游按提示返回符合 Schema 的 JSON 时预期 200，judgement 结果含 score 和 reason
+# 此请求会真实调用上游模型，可能产生费用。
+POST {{baseUrl}}/api/llm/invoke
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "model_id": "{{createModel.response.body.$.model_id}}",
+  "input": "Project Euler exists to encourage, challenge, and develop the skills and enjoyment of anyone with an interest in the fascinating world of mathematics.",
+  "response_type": "anomaly_repair"
+}
+
+
+### 9. 查询第一枚令牌的调用记录：预期 200，最新记录对应上一步调用
+GET {{baseUrl}}/api/calls?limit=10&offset=0
+Authorization: Bearer {{token}}
+
+### 9a. 查询第二枚令牌的调用记录：预期 200，不包含第一枚令牌的调用
+GET {{baseUrl}}/api/calls?limit=10&offset=0
+Authorization: Bearer {{token2}}
+
+### 10. 可选：验证未注册结果类型，预期 422；不会调用上游或生成记录
+POST {{baseUrl}}/api/llm/invoke
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "model_id": "{{createModel.response.body.$.model_id}}",
+  "input": "测试未知结果类型",
+  "response_type": "not_registered"
+}
+
+### 11. 可选：验证无效令牌，预期 401
+GET {{baseUrl}}/api/models
+Authorization: Bearer invalid-token
+
+### 12. 清理测试模型：预期 204；这是软删除，调用记录仍保留
+DELETE {{baseUrl}}/api/models/{{createModel.response.body.$.model_id}}
+Authorization: Bearer {{token}}
+
+### 13. 确认软删除：预期 404
+GET {{baseUrl}}/api/models/{{createModel.response.body.$.model_id}}
+Authorization: Bearer {{token}}
