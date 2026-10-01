@@ -129,19 +129,31 @@ class CallRepository:
             ).fetchall()
         return [_call_from_row(row) for row in rows]
 
+    def list_for_admin(self, *, limit: int, offset: int) -> List[Dict[str, Any]]:
+        """关联令牌标签供管理员追溯调用，不返回令牌原文或哈希。"""
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                "SELECT c.*, t.id AS token_id, t.label AS token_label "
+                "FROM call_records c LEFT JOIN auth_tokens t ON t.token_hash = c.token_hash "
+                "ORDER BY c.created_at DESC, c.id DESC LIMIT ? OFFSET ?",
+                (limit, offset),
+            ).fetchall()
+        return [{"record": _call_from_row(row), "token_id": row["token_id"],
+                 "token_label": row["token_label"]} for row in rows]
+
 
 class AuthRepository:
     def __init__(self, database: Database):
         self.database = database
 
-    def create(self, token_hash: str, expires_at: datetime) -> AuthRecord:
+    def create(self, token_hash: str, expires_at: datetime, label: str = "") -> AuthRecord:
         token_id = str(uuid4())
         now = utc_now().isoformat()
         with self.database.connect() as connection:
             connection.execute(
-                """INSERT INTO auth_tokens (id, token_hash, created_at, expires_at, enabled)
-                   VALUES (?, ?, ?, ?, 1)""",
-                (token_id, token_hash, now, expires_at.isoformat()),
+                """INSERT INTO auth_tokens (id, token_hash, label, created_at, expires_at, enabled)
+                   VALUES (?, ?, ?, ?, ?, 1)""",
+                (token_id, token_hash, label, now, expires_at.isoformat()),
             )
         record = self.get(token_id)
         assert record is not None
@@ -178,11 +190,26 @@ class AuthRepository:
             ).fetchone()
         return self._from_row(row) if row is not None else None
 
+    def list(self) -> List[AuthRecord]:
+        """列出令牌元数据，供管理员为旧令牌补充标签。"""
+        with self.database.connect() as connection:
+            rows = connection.execute("SELECT * FROM auth_tokens ORDER BY created_at DESC, id DESC").fetchall()
+        return [self._from_row(row) for row in rows]
+
+    def set_label_if_empty(self, token_id: str, label: str) -> bool:
+        """仅为未标注的令牌设置标签，避免历史调用归属被改写。"""
+        with self.database.connect() as connection:
+            cursor = connection.execute(
+                "UPDATE auth_tokens SET label = ? WHERE id = ? AND label = ''", (label, token_id)
+            )
+        return cursor.rowcount > 0
+
     @staticmethod
     def _from_row(row: sqlite3.Row) -> AuthRecord:
         return AuthRecord(
             id=row["id"],
             token_hash=row["token_hash"],
+            label=row["label"],
             created_at=datetime.fromisoformat(row["created_at"]),
             expires_at=datetime.fromisoformat(row["expires_at"]),
             enabled=bool(row["enabled"]),

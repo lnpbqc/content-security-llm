@@ -9,7 +9,7 @@
 | 字段 | 作用 | 要填什么 |
 | --- | --- | --- |
 | `setup_secret` | 管理员初始化密钥。创建令牌及启用、禁用令牌时放在 `X-Setup-Secret` 请求头。 | 至少 32 个字符的随机字符串；只保存在服务端。 |
-| `credential_key` | 本服务加密、解密 SQLite 中模型 `api_key` 的密钥。它**不参与前端鉴权**，也不是模型服务的 API Key。 | 一次生成的 Fernet 密钥；重启时必须保持不变。 |
+| `credential_key` | 本服务加密、解密 SQLite 中模型 `api_key` 和业务库密码的密钥。它**不参与前端鉴权**，也不是模型服务的 API Key。 | 一次生成的 Fernet 密钥；重启时必须保持不变。 |
 | `database_path` | SQLite 数据库文件的位置；首次启动时自动创建。 | 默认 `db/app.sqlite3` 即可；相对路径按配置文件所在目录解析。 |
 
 这几个值不要混用：`setup_secret` 负责签发与管理访问令牌；访问令牌由 `POST /api/auth/token` 的请求体提供，供调用者访问本服务；添加模型时提交的 `api_key` 则用于调用上游模型服务，由 `credential_key` 加密保存。
@@ -68,22 +68,24 @@ uv run fastapi dev main.py
 | --- | --- | --- |
 | `token` | 是 | 调用者自行生成、至少 32 个字符的共享令牌。 |
 | `expires_at` | 是 | 未来的过期时间，必须含时区，例如 `2030-12-31T00:00:00Z`。 |
+| `label` | 否 | 令牌持有人或用途名称，建议创建时填写；旧令牌可由管理员补充。 |
 
 ```json
 {
   "token": "replace-with-a-random-token-at-least-32-chars",
-  "expires_at": "2030-12-31T00:00:00Z"
+  "expires_at": "2030-12-31T00:00:00Z",
+  "label": "业务后端"
 }
 ```
 
-成功时返回 `{"created_at":"2026-09-28T10:00:00Z","expires_at":"2030-12-31T00:00:00Z","enabled":true}`。每次调用都会新增一枚独立令牌，不会替换已有令牌。服务只保存令牌摘要，不生成或返回令牌原文；请自行妥善保存提交的令牌原文。相同令牌不能重复创建，重复时返回 `409 token_already_exists`。缺少或填错 `X-Setup-Secret` 返回 `403`，令牌太短或过期时间无效返回 `422`。令牌过期后仍可用初始化密钥创建新令牌。
+成功时仍返回 `created_at`、`expires_at` 和 `enabled`；管理员可通过 `/api/v1/admin/tokens` 查询 `id` 和 `label`。每次调用都会新增一枚独立令牌，不会替换已有令牌。服务只保存令牌摘要，不生成或返回令牌原文；请自行妥善保存提交的令牌原文。相同令牌不能重复创建，重复时返回 `409 token_already_exists`。缺少或填错 `X-Setup-Secret` 返回 `403`，令牌太短或过期时间无效返回 `422`。令牌过期后仍可用初始化密钥创建新令牌。
 
 两个状态接口都使用 `X-Setup-Secret`，**不需要 Bearer 令牌**：
 
 - `PATCH /api/auth/token/status` 请求体为 `{"token":"令牌原文","enabled":false}`（启用时设为 `true`），只修改该令牌，返回 `created_at`、`expires_at` 和最新 `enabled`；令牌不存在返回 `404 token_not_found`。
 - `PATCH /api/auth/tokens/status` 请求体为 `{"enabled":false}`（启用时设为 `true`），修改**当前已创建的全部令牌**，返回 `{"enabled":false,"updated_count":2}`；没有令牌时 `updated_count` 为 `0`。之后新建的令牌仍默认启用。
 
-被禁用的令牌访问其他接口会收到 `401 invalid_token`；重新启用后，只有尚未过期的令牌能恢复使用。缺少或填错初始化密钥返回 `403 invalid_setup_secret`。数据库中的 `id` 仅供内部使用，接口通过令牌原文定位单个令牌。
+被禁用的令牌访问其他接口会收到 `401 invalid_token`；重新启用后，只有尚未过期的令牌能恢复使用。缺少或填错初始化密钥返回 `403 invalid_setup_secret`。旧状态接口仍通过令牌原文定位令牌。
 
 ### 模型配置
 
@@ -232,3 +234,39 @@ uv run pytest
 ```
 
 测试使用临时 SQLite 和模拟模型服务，不会产生真实模型调用费用。
+
+## 数据治理模型任务
+
+本服务另提供 `/api/v1` 下的三类异步模型任务，不改变上文 `/api` 接口。新增接口沿用本服务 Bearer 令牌，响应为 `{code, message, data, trace_id, timestamp}`。结果按创建任务的令牌隔离；所有结果查询只读取 SQLite 快照。
+
+先用 `POST /api/models` 创建模型，再用管理员接口绑定三类任务的本地 `model_id`。管理员接口只接受 `X-Setup-Secret`，成功响应采用 `{code, message, data, trace_id, timestamp}`：
+
+| 方法与路径 | 请求体或用途 |
+| --- | --- |
+| `PUT /api/v1/admin/governance/models/{kind}` | `{"model_id":"本地模型ID"}`；`kind` 为 `governance-value`、`governance-anomaly` 或 `governance-risk`。 |
+| `GET /api/v1/admin/governance/models` | 查询当前三类任务的模型绑定。 |
+| `PUT /api/v1/admin/governance/business-database` | `{"host":"主机","port":3306,"database":"库名","username":"只读用户","password":"密码"}`；保存时加密密码，不立即连库。 |
+| `GET /api/v1/admin/governance/business-database` | 查询连接元数据；不返回密码或密文。未配置时 `data` 为 `null`。 |
+| `GET /api/v1/admin/tokens` | 查询令牌 ID、持有人或用途标签及状态，不返回令牌原文或哈希。 |
+| `PATCH /api/v1/admin/tokens/{id}/label` | `{"label":"持有人或用途"}`；只允许给空标签的旧令牌补一次，避免历史记录换名。 |
+| `GET /api/v1/admin/calls?limit=50&offset=0` | 跨令牌查询调用记录及 `token_id`、`token_label`。 |
+
+任务模型绑定和业务库连接均保存在本项目 SQLite。密码用 `credential_key` 加密；重启时须使用相同密钥。旧配置文件中的 `governance_model_ids` 和 `business_database_url` 暂被接受但不再生效，应通过上述接口重新配置。未配置模型或模型已删除时，创建对应任务返回 `503`。启动 API 后，另起一个进程执行：
+
+```powershell
+uv run python -m service.governance_worker
+```
+
+当前 worker 设计为单实例运行。`--once` 可领取并处理一个任务。worker 重启时会将中断的 `running` 任务重新排队，跳过已保存的逐条结果；模型调用进行中恰好中断时，该条可能再次调用。
+
+| 任务 | 创建和轮询 | 只读结果 |
+| --- | --- | --- |
+| 价值分析 | `POST /api/v1/tasks`（`kind=governance-value`）；`GET /api/v1/tasks`、`GET /api/v1/tasks/{id}` | `/api/v1/data-governance/value-results/latest`、`/{id}`、`/{id}/samples` |
+| 异常治理 | `POST /api/v1/data-governance/anomaly-tasks`；`GET .../anomaly-tasks/{id}` | `/api/v1/data-governance/anomaly-results/latest`、历史列表、`/{id}`、`/{id}/samples`、`/{id}/samples/{sampleId}` |
+| 风险分级 | `POST /api/v1/data-governance/risk-tasks`；`GET .../risk-tasks/{id}` | `/api/v1/data-governance/risk-results/latest`、历史列表、`/{id}`、`/{id}/samples`、`/{id}/samples/{sampleId}` |
+
+创建请求只包含 `kind`、`name`、`input: {dataset_id, version_id, language, scheme_id}`，立即返回 `pending`，不需要传样本正文。worker 使用管理员保存的只读连接访问业务后端 MySQL，核对 `datasets.version` 与请求的 `version_id`，按 `dataset_records.id` 升序读取该数据集的全部记录。每条记录的 `payload` 按字段名升序拼成多行 `字段名: 值`；嵌套值采用字段名排序的 JSON。`language` 保留在范围中，目前不筛选记录；行内无语种时模型输入使用 `unknown`。支持的方案为价值 `general-v1`/`general-v2`、异常 `anomaly-basic-v1`、风险 `risk-v1`，规则仍由 `service/governance_data.py` 提供。
+
+本服务无需 MySQL 即可启动和创建任务。未配置连接、连接失败、数据集版本不匹配或无记录时，worker 将任务标记为 `failed`，不会调用模型。业务库的 `dataset_records` 没有版本字段，因此当前版本匹配后会读取该数据集的全部记录，包括可能在旧版本接入的记录。业务库连接建议使用只具有 `datasets` 和 `dataset_records` 查询权限的账号；连接参数仅保存在本项目 SQLite，不进入任务请求或结果。治理任务、逐条模型输出和结果快照仍写入本项目 SQLite；业务后端可通过现有只读结果接口获取。真实业务库连接尚未提供，自动化测试用模拟连接验证。
+
+本次不提供数据资源、options、KPI、人工复核、change-sets 或导出接口。现有前端仍请求业务后端，尚未把这些新路由的流量切到本服务。将来切流时，异常和风险页面还需在 `pending` 状态下继续轮询。

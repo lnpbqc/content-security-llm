@@ -5,6 +5,12 @@ from typing import Dict, List, Literal, Optional, Type
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
+ValueDimensionName = Literal["文化价值", "信息价值", "稀缺性", "可信度", "代表性"]
+AnomalyType = Literal["标签异常", "重复记录", "格式异常", "字段缺失"]
+RiskCategory = Literal["个人信息暴露", "误导信息", "仇恨歧视", "违法有害"]
+RiskLevel = Literal["HIGH", "MEDIUM", "LOW", "NOTICE"]
+
+
 class TextAnswer(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -30,8 +36,8 @@ class ModelRiskGovernanceOutput(BaseModel):
 class SemanticRiskFinding(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    category: Literal["个人信息暴露", "误导信息", "仇恨歧视", "违法有害"]
-    suggestedLevel: Literal["HIGH", "MEDIUM", "LOW", "NOTICE"]
+    category: RiskCategory
+    suggestedLevel: RiskLevel
     reason: str
     ruleId: str
     evidenceRefs: List[str]
@@ -50,13 +56,13 @@ class SemanticRiskOutput(BaseModel):
     findings: List[SemanticRiskFinding]
     evidence: List[SemanticRiskEvidence]
     primaryCategory: str
-    maximumSuggestedLevel: Literal["HIGH", "MEDIUM", "LOW", "NOTICE"]
+    maximumSuggestedLevel: RiskLevel
 
 
 class ValueScoreDimension(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    name: Literal["文化价值", "信息价值", "稀缺性", "可信度", "代表性"]
+    name: ValueDimensionName
     score: Optional[float] = Field(default=None, ge=0, le=100)
     reason: str
     evidence: List[str]
@@ -81,7 +87,7 @@ class ValueScoreOutput(BaseModel):
 class AnomalyFinding(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    type: Literal["标签异常", "重复记录", "格式异常", "字段缺失"]
+    type: AnomalyType
     field: str
     reason: str
     quote: str

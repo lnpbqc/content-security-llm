@@ -24,7 +24,8 @@ def create_token(
     service: AuthService = Depends(get_auth_service),
 ) -> TokenPublic:
     try:
-        record = service.create_token(x_setup_secret, payload.token, payload.expires_at)
+        record = service.create_token(x_setup_secret, payload.token, payload.expires_at,
+                                      payload.label)
     except InvalidSetupSecretError as exc:
         raise HTTPException(status_code=403, detail={"code": "invalid_setup_secret"}) from exc
     except TokenAlreadyExistsError as exc:

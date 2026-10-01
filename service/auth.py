@@ -34,11 +34,12 @@ class AuthService:
         ):
             raise InvalidSetupSecretError
 
-    def create_token(self, setup_secret: Optional[str], token: str, expires_at: datetime) -> AuthRecord:
+    def create_token(self, setup_secret: Optional[str], token: str, expires_at: datetime,
+                     label: str = "") -> AuthRecord:
         self._require_setup_secret(setup_secret)
         digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
         try:
-            return self.repository.create(digest, expires_at)
+            return self.repository.create(digest, expires_at, label)
         except sqlite3.IntegrityError as exc:
             raise TokenAlreadyExistsError from exc
 

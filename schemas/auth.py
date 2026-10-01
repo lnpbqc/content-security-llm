@@ -11,6 +11,7 @@ from utils.time import utc_now
 class TokenCreate(BaseModel):
     token: str = Field(min_length=32)
     expires_at: datetime
+    label: str = Field(default="", max_length=100)
 
     @field_validator("expires_at")
     @classmethod
@@ -42,6 +43,20 @@ class TokenPublic(BaseModel):
             expires_at=record.expires_at,
             enabled=record.enabled,
         )
+
+
+class AdminTokenPublic(TokenPublic):
+    """管理员可见的令牌 ID 与持有人或用途标签。"""
+
+    id: str
+    label: str
+
+    @classmethod
+    def from_record(cls, record: AuthRecord) -> "AdminTokenPublic":
+        """将已保存的令牌元数据映射为管理员响应。"""
+        return cls(id=record.id, label=record.label,
+                   created_at=record.created_at, expires_at=record.expires_at,
+                   enabled=record.enabled)
 
 
 class TokenBulkStatus(BaseModel):

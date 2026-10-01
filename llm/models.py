@@ -93,8 +93,10 @@ class ModelManager:
 
     def invoke(
         self, model_id: str, input: str, response_model: Type[T], *,
-        response_type: Optional[str] = None, token_hash: str
+        response_type: Optional[str] = None, token_hash: str,
+        validator: Optional[Callable[[T], None]] = None,
     ) -> T:
+        """调用模型并解析结构；可选校验器失败时记为错误调用。"""
         record = self.get_model(model_id)
         type_name = response_type or response_model.__name__
         try:
@@ -127,6 +129,8 @@ class ModelManager:
             if not content:
                 raise InvocationError("empty_response", "Model returned no content")
             parsed = parse_model_output(content, response_model)
+            if validator is not None:
+                validator(parsed)
         except APITimeoutError as exc:
             self._log_error(model_id, token_hash, input, type_name, "provider_timeout")
             raise InvocationError("provider_timeout", "Model provider timed out", 504) from exc

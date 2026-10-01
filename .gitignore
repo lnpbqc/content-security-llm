@@ -16,4 +16,5 @@ db/*.sqlite3-*
 .env
 settings.local.json
 tests/**
+!tests/test_governance.py
 docs/

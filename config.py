@@ -1,4 +1,4 @@
-"""Load runtime settings from a local JSON file with optional environment overrides."""
+"""读取本地启动配置；治理任务配置由 SQLite 管理。"""
 
 import base64
 import binascii
@@ -24,6 +24,7 @@ def _config_path() -> Path:
 
 
 def _read_config(path: Path) -> Dict[str, Any]:
+    """读取私有配置，并拒绝未知字段以避免配置拼写错误。"""
     if not path.is_file():
         if os.getenv("APP_CONFIG_FILE"):
             raise RuntimeError("Config file does not exist: {}".format(path))
@@ -34,7 +35,8 @@ def _read_config(path: Path) -> Dict[str, Any]:
         raise RuntimeError("Cannot read config file: {}".format(path)) from exc
     if not isinstance(data, dict):
         raise RuntimeError("Config file must contain a JSON object")
-    unknown = set(data) - {"setup_secret", "credential_key", "database_path"}
+    unknown = set(data) - {"setup_secret", "credential_key", "database_path", "governance_model_ids",
+                           "business_database_url"}
     if unknown:
         raise RuntimeError("Unknown config fields: {}".format(", ".join(sorted(unknown))))
     return data
@@ -47,6 +49,7 @@ class Settings:
 
     @classmethod
     def load(cls) -> "Settings":
+        """读取并校验启动配置；旧治理配置字段仅为兼容旧文件而忽略。"""
         path = _config_path()
         data = _read_config(path)
         setup_secret = os.getenv("APP_SETUP_SECRET", data.get("setup_secret", ""))

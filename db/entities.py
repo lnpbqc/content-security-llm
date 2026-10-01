@@ -35,6 +35,7 @@ class CallRecord:
 class AuthRecord:
     id: str
     token_hash: str
+    label: str
     created_at: datetime
     expires_at: datetime
     enabled: bool
