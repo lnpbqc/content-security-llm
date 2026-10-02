@@ -7,7 +7,7 @@
 # 管理员用 X-Setup-Secret 可切换指定令牌或全部现有令牌的状态。
 
 @baseUrl = http://127.0.0.1:8000
-@setupSecret = 
+@setupSecret = 22LKmmYi9GtweJi-Pd10q-s9eNlVkfaTJcgqaDvecgo
 @token = OrWYnmMnLdKWpZqtdjr-YU6r3h1JDVZ-ZH9otJblGjg=
 @expiresAt = 2035-12-31T00:00:00Z
 @token2 = staypositiveandmakeeverydaycount
@@ -16,7 +16,7 @@
 # @upstreamApiKey = sk-GEuAwGQZbKiMoKuJNka3LjFuSWnZyBnAgu5dYETwv5ZKIrDY
 @upstreamBaseUrl = https://api.deepseek.com
 @upstreamModelId = deepseek-flash
-@upstreamApiKey = 
+@upstreamApiKey = sk-d5e9662b46b1416782d88876c9a1c040
 
 ### 1. 健康检查：预期 200，不需要鉴权
 GET {{baseUrl}}/
