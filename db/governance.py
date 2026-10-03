@@ -170,12 +170,14 @@ class GovernanceRepository:
         return _result(row)
 
     def list_results(self, kind: str, token_hash: str,
-                     scope: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """按令牌、类型和完整范围读取历史结果，新的排在前面。"""
+                     scope: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+        """按令牌和类型读取快照；指定范围时做完整匹配，新的排在前面。"""
+        query = "SELECT * FROM governance_results WHERE token_hash = ? AND kind = ?"
+        params = [token_hash, kind]
+        if scope is not None:
+            query += " AND scope_json = ?"
+            params.append(scope_json(scope))
+        query += " ORDER BY created_at DESC, id DESC"
         with self.database.connect() as connection:
-            rows = connection.execute(
-                """SELECT * FROM governance_results WHERE token_hash = ? AND kind = ? AND scope_json = ?
-                   ORDER BY created_at DESC, id DESC""",
-                (token_hash, kind, scope_json(scope)),
-            ).fetchall()
+            rows = connection.execute(query, params).fetchall()
         return [_result(row) for row in rows]

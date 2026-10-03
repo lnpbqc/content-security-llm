@@ -14,6 +14,19 @@ from utils.time import utc_now
 router = APIRouter(prefix="/api/v1", tags=["governance"], dependencies=[Depends(require_token)])
 
 
+def require_kind(expected: str):
+    """校验清单中的 kind；未携带时沿用路由类型，兼容已有只读调用。"""
+    def validate(kind: Optional[str] = Query(None)):
+        if kind is not None and kind != expected:
+            raise HTTPException(400, detail={"code": "invalid_kind", "message": "任务类型与路径不一致"})
+    return validate
+
+
+value_kind = Depends(require_kind("governance-value"))
+anomaly_kind = Depends(require_kind("governance-anomaly"))
+risk_kind = Depends(require_kind("governance-risk"))
+
+
 class Scope(BaseModel):
     """指定任务处理范围：哪个数据集版本、哪种语种和哪套方案。"""
 
@@ -70,7 +83,7 @@ def _create(request: Request, payload: TaskCreate, kind: str,
             service: GovernanceService, token_hash: str):
     """核对路径与任务类型，创建 pending 任务并包装响应。"""
     if payload.kind != kind:
-        raise HTTPException(422, detail={"code": "invalid_kind", "message": "任务类型与路径不一致"})
+        raise HTTPException(400, detail={"code": "invalid_kind", "message": "任务类型与路径不一致"})
     try:
         task = service.create_task(kind, payload.name, payload.input.model_dump(), token_hash)
     except ValueError as exc:
@@ -121,7 +134,7 @@ def list_value_tasks(request: Request, kind: str = Query(...),
                      token_hash: str = Depends(require_token)):
     """分页查询当前令牌在指定范围内的价值分析任务。"""
     if kind != "governance-value":
-        raise HTTPException(422, detail={"code": "invalid_kind", "message": "不支持的任务类型"})
+        raise HTTPException(400, detail={"code": "invalid_kind", "message": "不支持的任务类型"})
     result = service.repository.list_tasks(kind, token_hash, scope, page_size, (page - 1) * page_size)
     return success(request, {"items": [_task_public(task, service) for task in result["items"]],
                              "total": result["total"], "page": page, "page_size": page_size,
@@ -134,7 +147,7 @@ def get_value_task(request: Request, task_id: str, kind: str = Query(...),
                    token_hash: str = Depends(require_token)):
     """查询一项价值分析任务的当前状态和结果 ID。"""
     if kind != "governance-value":
-        raise HTTPException(422, detail={"code": "invalid_kind", "message": "不支持的任务类型"})
+        raise HTTPException(400, detail={"code": "invalid_kind", "message": "不支持的任务类型"})
     return _get_task(request, task_id, kind, service, token_hash)
 
 
@@ -153,7 +166,7 @@ def get_anomaly_task(request: Request, task_id: str,
                      token_hash: str = Depends(require_token)):
     """查询异常治理任务状态、已处理样本数和结果 ID。"""
     if kind != "governance-anomaly":
-        raise HTTPException(422, detail={"code": "invalid_kind", "message": "不支持的任务类型"})
+        raise HTTPException(400, detail={"code": "invalid_kind", "message": "不支持的任务类型"})
     return _get_task(request, task_id, kind, service, token_hash)
 
 
@@ -171,23 +184,30 @@ def get_risk_task(request: Request, task_id: str, kind: str = Query("governance-
                   token_hash: str = Depends(require_token)):
     """查询风险分级任务的当前状态和结果 ID。"""
     if kind != "governance-risk":
-        raise HTTPException(422, detail={"code": "invalid_kind", "message": "不支持的任务类型"})
+        raise HTTPException(400, detail={"code": "invalid_kind", "message": "不支持的任务类型"})
     return _get_task(request, task_id, kind, service, token_hash)
+
+
+def _summary_public(result, kind):
+    """风险页可查看任务和导出；仅补响应动作，不修改保存快照。"""
+    if kind == "governance-risk":
+        return {**result["summary"], "actions": ["viewTask", "export"]}
+    return result["summary"]
 
 
 def _latest(request, kind, scope, service, token_hash):
     """读取完整范围内最新的已完成结果；没有则返回 null。"""
     results = service.repository.list_results(kind, token_hash, scope)
-    return success(request, results[0]["summary"] if results else None)
+    return success(request, _summary_public(results[0], kind) if results else None)
 
 
 def _history(request, kind, scope, service, token_hash):
     """读取完整范围内的已完成结果历史。"""
     results = service.repository.list_results(kind, token_hash, scope)
-    return success(request, [result["summary"] for result in results])
+    return success(request, [_summary_public(result, kind) for result in results])
 
 
-@router.get("/data-governance/value-results/latest")
+@router.get("/data-governance/value-results/latest", dependencies=[value_kind])
 def latest_value(request: Request, scope: Dict[str, Any] = Depends(query_scope),
                  service: GovernanceService = Depends(get_service),
                  token_hash: str = Depends(require_token)):
@@ -195,7 +215,7 @@ def latest_value(request: Request, scope: Dict[str, Any] = Depends(query_scope),
     return _latest(request, "governance-value", scope, service, token_hash)
 
 
-@router.get("/data-governance/value-results/{result_id}")
+@router.get("/data-governance/value-results/{result_id}", dependencies=[value_kind])
 def value_result(request: Request, result_id: str,
                  service: GovernanceService = Depends(get_service),
                  token_hash: str = Depends(require_token)):
@@ -203,7 +223,7 @@ def value_result(request: Request, result_id: str,
     return success(request, _get_result(service, result_id, "governance-value", token_hash)["summary"])
 
 
-@router.get("/data-governance/value-results/{result_id}/samples")
+@router.get("/data-governance/value-results/{result_id}/samples", dependencies=[value_kind])
 def value_samples(request: Request, result_id: str, page: int = Query(1, ge=1),
                   page_size: int = Query(10, ge=1, le=200), tier: str = "all",
                   keyword: str = "", bin: str = "", sort_by: Optional[str] = None,
@@ -211,7 +231,9 @@ def value_samples(request: Request, result_id: str, page: int = Query(1, ge=1),
                   service: GovernanceService = Depends(get_service),
                   token_hash: str = Depends(require_token)):
     """从已保存的价值样本中先筛选排序，再分页返回。"""
-    rows = list(_get_result(service, result_id, "governance-value", token_hash)["samples"])
+    result = _get_result(service, result_id, "governance-value", token_hash)
+    rows = [{**row, "dataset_id": result["scope"]["dataset_id"],
+             "version_id": result["scope"]["version_id"]} for row in result["samples"]]
     if tier not in {"all", "high", "medium", "low", "unavailable"} or (bin and bin not in set("01234")):
         raise HTTPException(422, detail={"code": "invalid_filter", "message": "评分筛选条件无效"})
     rows = [row for row in rows if (tier == "all" or row["tier"] == tier) and
@@ -229,7 +251,7 @@ def value_samples(request: Request, result_id: str, page: int = Query(1, ge=1),
     return success(request, _page(rows, page, page_size))
 
 
-@router.get("/data-governance/anomaly-results/latest")
+@router.get("/data-governance/anomaly-results/latest", dependencies=[anomaly_kind])
 def latest_anomaly(request: Request, scope: Dict[str, Any] = Depends(query_scope),
                    service: GovernanceService = Depends(get_service),
                    token_hash: str = Depends(require_token)):
@@ -237,7 +259,7 @@ def latest_anomaly(request: Request, scope: Dict[str, Any] = Depends(query_scope
     return _latest(request, "governance-anomaly", scope, service, token_hash)
 
 
-@router.get("/data-governance/anomaly-results")
+@router.get("/data-governance/anomaly-results", dependencies=[anomaly_kind])
 def anomaly_history(request: Request, scope: Dict[str, Any] = Depends(query_scope),
                     service: GovernanceService = Depends(get_service),
                     token_hash: str = Depends(require_token)):
@@ -245,7 +267,7 @@ def anomaly_history(request: Request, scope: Dict[str, Any] = Depends(query_scop
     return _history(request, "governance-anomaly", scope, service, token_hash)
 
 
-@router.get("/data-governance/anomaly-results/{result_id}")
+@router.get("/data-governance/anomaly-results/{result_id}", dependencies=[anomaly_kind])
 def anomaly_result(request: Request, result_id: str,
                    service: GovernanceService = Depends(get_service),
                    token_hash: str = Depends(require_token)):
@@ -253,7 +275,7 @@ def anomaly_result(request: Request, result_id: str,
     return success(request, _get_result(service, result_id, "governance-anomaly", token_hash)["summary"])
 
 
-@router.get("/data-governance/anomaly-results/{result_id}/samples")
+@router.get("/data-governance/anomaly-results/{result_id}/samples", dependencies=[anomaly_kind])
 def anomaly_samples(request: Request, result_id: str, page: int = Query(1, ge=1),
                     page_size: int = Query(10, ge=1, le=200), keyword: str = "",
                     type: str = "", status: str = "",
@@ -267,7 +289,7 @@ def anomaly_samples(request: Request, result_id: str, page: int = Query(1, ge=1)
     return success(request, _page(rows, page, page_size))
 
 
-@router.get("/data-governance/anomaly-results/{result_id}/samples/{sample_id}")
+@router.get("/data-governance/anomaly-results/{result_id}/samples/{sample_id}", dependencies=[anomaly_kind])
 def anomaly_sample(request: Request, result_id: str, sample_id: str,
                    service: GovernanceService = Depends(get_service),
                    token_hash: str = Depends(require_token)):
@@ -279,7 +301,7 @@ def anomaly_sample(request: Request, result_id: str, sample_id: str,
     return success(request, row)
 
 
-@router.get("/data-governance/risk-results/latest")
+@router.get("/data-governance/risk-results/latest", dependencies=[risk_kind])
 def latest_risk(request: Request, scope: Dict[str, Any] = Depends(query_scope),
                 service: GovernanceService = Depends(get_service),
                 token_hash: str = Depends(require_token)):
@@ -287,7 +309,7 @@ def latest_risk(request: Request, scope: Dict[str, Any] = Depends(query_scope),
     return _latest(request, "governance-risk", scope, service, token_hash)
 
 
-@router.get("/data-governance/risk-results")
+@router.get("/data-governance/risk-results", dependencies=[risk_kind])
 def risk_history(request: Request, scope: Dict[str, Any] = Depends(query_scope),
                  service: GovernanceService = Depends(get_service),
                  token_hash: str = Depends(require_token)):
@@ -295,15 +317,16 @@ def risk_history(request: Request, scope: Dict[str, Any] = Depends(query_scope),
     return _history(request, "governance-risk", scope, service, token_hash)
 
 
-@router.get("/data-governance/risk-results/{result_id}")
+@router.get("/data-governance/risk-results/{result_id}", dependencies=[risk_kind])
 def risk_result(request: Request, result_id: str,
                 service: GovernanceService = Depends(get_service),
                 token_hash: str = Depends(require_token)):
     """只读查询指定风险分级结果的汇总。"""
-    return success(request, _get_result(service, result_id, "governance-risk", token_hash)["summary"])
+    result = _get_result(service, result_id, "governance-risk", token_hash)
+    return success(request, _summary_public(result, "governance-risk"))
 
 
-@router.get("/data-governance/risk-results/{result_id}/samples")
+@router.get("/data-governance/risk-results/{result_id}/samples", dependencies=[risk_kind])
 def risk_samples(request: Request, result_id: str, page: int = Query(1, ge=1),
                  page_size: int = Query(10, ge=1, le=200), keyword: str = "",
                  level: str = "", status: str = "", sort_by: Optional[str] = None,
@@ -325,7 +348,7 @@ def risk_samples(request: Request, result_id: str, page: int = Query(1, ge=1),
     return success(request, _page(rows, page, page_size))
 
 
-@router.get("/data-governance/risk-results/{result_id}/samples/{sample_id}")
+@router.get("/data-governance/risk-results/{result_id}/samples/{sample_id}", dependencies=[risk_kind])
 def risk_sample(request: Request, result_id: str, sample_id: str,
                 service: GovernanceService = Depends(get_service),
                 token_hash: str = Depends(require_token)):

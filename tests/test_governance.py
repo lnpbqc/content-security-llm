@@ -521,3 +521,242 @@ def test_app_starts_without_mysql_and_worker_marks_task_failed(tmp_path):
         assert task["status"] == "failed"
         assert "业务数据库连接未配置" in task["error_message"]
         assert FakeCompletionClient.calls == []
+
+
+def test_frontend_options_empty_overviews_and_business_boundary(app_client):
+    """无历史时可初始化；方案只显示模型能力，业务目录不由模型服务接管。"""
+    app, client, _, business = app_client
+    options = client.get("/api/v1/data-governance/options", headers=headers(),
+                         params={"kind": "governance-value"}).json()["data"]
+    assert [row["id"] for row in options["schemes"]] == ["general-v1", "general-v2"]
+    options = client.get("/api/v1/data-governance/options", headers=headers(),
+                         params={"kind": "governance-anomaly"}).json()["data"]
+    assert options["schemes"][0]["id"] == "anomaly-basic-v1"
+    assert options["types"] == ["标签异常"]
+    assert [rule["id"] for rule in options["rules"]] == ["anomaly-rule-1"]
+    risk = client.get("/api/v1/data-governance/risk-options", headers=headers()).json()["data"]
+    assert risk["schemes"][0]["id"] == "risk-v1"
+    assert risk["read_only"] and risk["review_decisions"] == []
+    for path in ("/overview", "/data-governance/anomaly-results/overview",
+                 "/data-governance/risk-overview"):
+        response = client.get("/api/v1" + path, headers=headers())
+        assert response.status_code == 200, response.text
+        assert all(row["value"] == 0 for row in response.json()["data"]["cards"])
+    for path in ("/datasets", "/datasets/3/versions", "/datasets/3/versions/v1.0.0/samples"):
+        assert client.get("/api/v1" + path, headers=headers(), params={"ids[]": "1"}).status_code == 404
+    assert client.get("/api/v1/data-governance/options",
+                      params={"kind": "governance-value"}).status_code == 401
+    assert business.connections == 0 and FakeCompletionClient.calls == []
+
+
+def test_value_samples_add_scope_without_changing_saved_history(app_client):
+    """范围字段仅补响应，保存快照不变，历史正文与业务记录后续变更隔离。"""
+    app, client, _, business = app_client
+    service = app.state.governance_service
+    first = create(client, "governance-value", "general-v1")
+    assert service.run_once()
+    task = service.repository.get_task(first["task_id"])
+    result_id = task["result_id"]
+    stored = service.repository.get_result(result_id, task["token_hash"], "governance-value")
+    assert all("dataset_id" not in row and "version_id" not in row for row in stored["samples"])
+    business.records[3][0]["payload"]["text"] = "变更后的正文"
+    second = create(client, "governance-value", "general-v1")
+    assert service.run_once()
+    latest_id = service.repository.get_task(second["task_id"])["result_id"]
+    business.unavailable = True
+    calls, connections = len(FakeCompletionClient.calls), business.connections
+    path = "/api/v1/data-governance/value-results/" + result_id + "/samples"
+    response = client.get(path, headers=headers(), params={"page_size": 2})
+    assert response.status_code == 200
+    rows = response.json()["data"]["items"]
+    assert {row["id"] for row in rows} == {"1", "2"}
+    assert all(row["dataset_id"] == 3 and row["version_id"] == "v1.0.0" for row in rows)
+    assert "变更后的正文" not in rows[0]["text"]
+    assert client.get(path, headers=headers("b")).status_code == 404
+    assert client.get(path.replace("value-results", "anomaly-results"), headers=headers()).status_code == 404
+    latest_path = "/api/v1/data-governance/value-results/" + latest_id + "/samples"
+    latest = client.get(latest_path, headers=headers(), params={"page_size": 1}).json()["data"]["items"]
+    assert len(latest) == 1 and "变更后的正文" in latest[0]["text"]
+    assert service.repository.get_result(result_id, task["token_hash"], "governance-value") == stored
+    assert len(FakeCompletionClient.calls) == calls and business.connections == connections
+
+
+def test_model_overviews_count_latest_snapshot_once_and_isolate_tokens(app_client):
+    """重复执行不累加同一版本；统计来自保存结果且不含其他令牌。"""
+    app, client, _, business = app_client
+    service = app.state.governance_service
+    for kind, scheme in (("governance-value", "general-v1"),
+                         ("governance-anomaly", "anomaly-basic-v1"),
+                         ("governance-risk", "risk-v1")):
+        for _ in range(2):
+            create(client, kind, scheme)
+            assert service.run_once()
+    calls, connections = len(FakeCompletionClient.calls), business.connections
+    kpis = client.get("/api/v1/kpis", headers=headers(),
+                      params={"kind": "governance-value"}).json()["data"]
+    assert [row["value"] for row in kpis] == [80, 0, 3, 1]
+    anomaly = client.get("/api/v1/data-governance/anomaly-results/overview",
+                         headers=headers()).json()["data"]
+    assert [row["value"] for row in anomaly["cards"]] == [3, 1, 0, 0]
+    risk = client.get("/api/v1/data-governance/risk-overview", headers=headers()).json()["data"]
+    assert [row["value"] for row in risk["cards"]] == [3, 1, 0, 1]
+    assert len(risk["records"]) == 1
+    other = client.get("/api/v1/data-governance/risk-overview", headers=headers("b")).json()["data"]
+    assert other["records"] == [] and all(row["value"] == 0 for row in other["cards"])
+    assert len(FakeCompletionClient.calls) == calls and business.connections == connections
+
+
+def test_risk_export_and_knowledge_use_saved_masked_samples(app_client):
+    """导出包含所有匹配行、保持遮蔽，规则检索不触发模型或业务读写。"""
+    app, client, _, business = app_client
+    service = app.state.governance_service
+    created = create(client, "governance-risk", "risk-v1")
+    assert service.run_once()
+    result_id = service.repository.get_task(created["id"])["result_id"]
+    base = "/api/v1/data-governance/risk-results/" + result_id
+    detail = client.get(base, headers=headers()).json()["data"]
+    assert detail["actions"] == ["viewTask", "export"]
+    token_hash = service.repository.get_task(created["id"])["token_hash"]
+    assert service.repository.get_result(result_id, token_hash, "governance-risk")["summary"]["actions"] == []
+    calls, connections = len(FakeCompletionClient.calls), business.connections
+    page = client.get(base + "/samples", headers=headers(), params={"page_size": 1}).json()["data"]
+    assert len(page["items"]) == 1 and page["total"] == 3
+    rows = client.post(base + "/export", headers=headers(), json={}).json()["data"]
+    assert len(rows) == 3 and "10086" not in json.dumps(rows, ensure_ascii=False)
+    filtered = client.post(base + "/export", headers=headers(),
+                           json={"keyword": "用户ID", "level": "MEDIUM", "status": "待复核"}).json()["data"]
+    assert len(filtered) == 1
+    params = {"result_id": result_id, "sample_id": filtered[0]["id"], "keyword": "pii-03"}
+    rules = client.get("/api/v1/risk-knowledge", headers=headers(), params=params).json()["data"]
+    assert [rule["id"] for rule in rules] == ["PII-03"]
+    assert client.post(base + "/export", headers=headers("b"), json={}).status_code == 404
+    assert client.get("/api/v1/risk-knowledge", headers=headers("b"), params=params).status_code == 404
+    params["sample_id"] = "missing"
+    assert client.get("/api/v1/risk-knowledge", headers=headers(), params=params).status_code == 404
+    assert len(FakeCompletionClient.calls) == calls and business.connections == connections
+
+
+def test_model_read_only_contract_rejects_business_writes(app_client):
+    """只读页初始化无修改集，审批、发布和复核明确拒绝而不伪造业务成功。"""
+    app, client, _, business = app_client
+    response = client.get("/api/v1/data-governance/change-sets/current", headers=headers(),
+                          params=scope("anomaly-basic-v1"))
+    assert response.status_code == 200 and response.json()["data"] is None
+    for path in ("/data-governance/change-sets/publish",
+                 "/data-governance/anomaly-results/r/samples/s/candidates/approve",
+                 "/data-governance/risk-results/r/samples/s/reviews"):
+        response = client.post("/api/v1" + path, headers=headers(), json={})
+        assert response.status_code == 405
+        assert response.json()["code"] == 405
+        assert "仅支持分析查看" in response.json()["message"]
+    assert business.connections == 0 and FakeCompletionClient.calls == []
+
+
+@pytest.mark.parametrize("path,scheme", [
+    ("/data-governance/options", "general-v1"),
+    ("/kpis", "general-v1"),
+    ("/data-governance/value-results/latest", "general-v1"),
+    ("/data-governance/value-results/missing", "general-v1"),
+    ("/data-governance/value-results/missing/samples", "general-v1"),
+    ("/data-governance/anomaly-results/latest", "anomaly-basic-v1"),
+    ("/data-governance/anomaly-results", "anomaly-basic-v1"),
+    ("/data-governance/anomaly-results/missing", "anomaly-basic-v1"),
+    ("/data-governance/anomaly-results/missing/samples", "anomaly-basic-v1"),
+    ("/data-governance/anomaly-results/missing/samples/1", "anomaly-basic-v1"),
+    ("/data-governance/risk-results/latest", "risk-v1"),
+    ("/data-governance/risk-results", "risk-v1"),
+    ("/data-governance/risk-results/missing", "risk-v1"),
+    ("/data-governance/risk-results/missing/samples", "risk-v1"),
+    ("/data-governance/risk-results/missing/samples/1", "risk-v1"),
+    ("/data-governance/risk-options", "risk-v1"),
+    ("/data-governance/risk-overview", "risk-v1"),
+    ("/overview", "anomaly-basic-v1"),
+    ("/data-governance/anomaly-results/overview", "anomaly-basic-v1"),
+    ("/data-governance/change-sets/current", "anomaly-basic-v1"),
+    ("/risk-knowledge", "risk-v1"),
+])
+def test_frontend_read_routes_reject_wrong_kind(app_client, path, scheme):
+    """清单要求 kind 生效，不能在只读兼容接口上悄悄忽略错误类型。"""
+    app, client, _, business = app_client
+    response = client.get("/api/v1" + path, headers=headers(),
+                          params={**scope(scheme), "kind": "wrong", "result_id": "r", "sample_id": "1"})
+    assert response.status_code == 400, response.text
+    assert response.json()["code"] == 400 and response.json()["data"] is None
+    assert business.connections == 0 and FakeCompletionClient.calls == []
+
+
+def test_frontend_export_rejects_wrong_kind_before_returning_samples(app_client):
+    """导出与查询执行相同的任务类型约束。"""
+    app, client, _, business = app_client
+    response = client.post("/api/v1/data-governance/risk-results/missing/export",
+                           headers=headers(), params={"kind": "governance-anomaly"}, json={})
+    assert response.status_code == 400, response.text
+    assert business.connections == 0 and FakeCompletionClient.calls == []
+
+
+def test_frontend_task_routes_reject_wrong_kind(app_client):
+    """任务入口不能混用治理类型；清单中的错误 kind 返回 400。"""
+    app, client, _, business = app_client
+    for path, scheme in (("/tasks", "general-v1"),
+                         ("/data-governance/anomaly-tasks", "anomaly-basic-v1"),
+                         ("/data-governance/risk-tasks", "risk-v1")):
+        created = client.post("/api/v1" + path, headers=headers(),
+                              json={"kind": "wrong", "name": "错误类型", "input": scope(scheme)})
+        assert created.status_code == 400 and created.json()["data"] is None
+        queried = client.get("/api/v1" + path + "/missing", headers=headers(), params={"kind": "wrong"})
+        assert queried.status_code == 400 and queried.json()["data"] is None
+    assert business.connections == 0 and FakeCompletionClient.calls == []
+
+
+@pytest.mark.parametrize("name,scheme", [
+    ("value", "general-v1"), ("anomaly", "anomaly-basic-v1"), ("risk", "risk-v1"),
+])
+def test_frontend_checklist_read_only_chain(app_client, name, scheme):
+    """按清单正确 kind 和分页参数执行从建单到保存结果、校验和全量导出的链路。"""
+    app, client, _, business = app_client
+    service = app.state.governance_service
+    kind = "governance-" + name
+    base = "/api/v1/data-governance/" + name + "-results"
+    params = {"kind": kind, **scope(scheme)}
+    assert client.get(base + "/latest", headers=headers(), params=params).json()["data"] is None
+    created = create(client, kind, scheme)
+    task_id = created.get("task_id") or created["id"]
+    task_path = "/api/v1/tasks/" if name == "value" else "/api/v1/data-governance/" + name + "-tasks/"
+    pending = client.get(task_path + task_id, headers=headers(), params={"kind": kind}).json()["data"]
+    assert pending["status"] == "pending" and pending["result_id"] is None
+    assert FakeCompletionClient.calls == []
+    assert service.repository.claim()["id"] == task_id
+    running = client.get(task_path + task_id, headers=headers(), params={"kind": kind}).json()["data"]
+    assert running["status"] == "running" and running["result_id"] is None
+    service.repository.recover_running()
+    assert service.run_once()
+    completed = client.get(task_path + task_id, headers=headers(), params={"kind": kind}).json()["data"]
+    assert completed["status"] == "succeeded" and completed["result_id"]
+    calls, connections = len(FakeCompletionClient.calls), business.connections
+    result_path = base + "/" + completed["result_id"]
+    response = client.get(result_path, headers=headers(), params={"kind": kind})
+    assert response.status_code == 200
+    envelope = response.json()
+    assert envelope["code"] == 0 and envelope["trace_id"] == "trace-test" and envelope["timestamp"]
+    result = envelope["data"]
+    assert result["scope"] == scope(scheme) and result["task_id"] == task_id
+    assert result == client.get(base + "/latest", headers=headers(), params=params).json()["data"]
+    if name != "value":
+        assert client.get(base, headers=headers(), params=params).json()["data"] == [result]
+    rows = []
+    for page in (1, 2, 3):
+        saved = client.get(result_path + "/samples", headers=headers(),
+                           params={"kind": kind, "page": page, "page_size": 1}).json()["data"]
+        assert saved["page"] == page and saved["page_size"] == 1
+        assert saved["total"] == 3 and saved["total_pages"] == 3
+        rows.extend(saved["items"])
+    assert {row["id"] for row in rows} == {"1", "2", "3"} and len(rows) == 3
+    if name == "risk":
+        exported = client.post(result_path + "/export", headers=headers(),
+                               params={"kind": kind}, json={}).json()["data"]
+        assert exported == rows
+        assert "10086" not in json.dumps(exported, ensure_ascii=False)
+    assert all(row["dataset_id"] == result["scope"]["dataset_id"]
+               and row["version_id"] == result["scope"]["version_id"] for row in rows)
+    assert client.get(result_path, headers=headers(), params={"kind": "wrong"}).status_code == 400
+    assert len(FakeCompletionClient.calls) == calls and business.connections == connections

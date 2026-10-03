@@ -124,7 +124,6 @@ class ModelManager:
             message = choice.message
             if getattr(message, "refusal", None):
                 raise InvocationError("model_refusal", "Model refused to provide a structured response")
-            print(message)
             content = getattr(message, "content", None)
             if not content:
                 raise InvocationError("empty_response", "Model returned no content")

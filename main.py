@@ -18,6 +18,7 @@ from llm.models import ModelManager
 from router import api_router
 from router.governance import router as governance_router
 from router.governance_admin import router as governance_admin_router
+from router.governance_frontend import router as governance_frontend_router
 from service.auth import AuthService
 from service.inference import InferenceService
 from service.governance import GovernanceService
@@ -59,6 +60,7 @@ def create_app(
 
     application = FastAPI(title="Content Security LLM", lifespan=lifespan)
     application.include_router(api_router)
+    application.include_router(governance_frontend_router)
     application.include_router(governance_router)
     application.include_router(governance_admin_router)
 

@@ -33,16 +33,16 @@ python -c "import base64,secrets; print(base64.urlsafe_b64encode(secrets.token_b
 编辑 `settings.local.json`，把第一条命令的结果填入 `setup_secret`，第二条命令的结果填入 `credential_key`。保留默认的 `database_path` 即可。不要保留模板中的 `REPLACE_WITH_...` 占位值。
 
 ```powershell
-uv run fastapi dev main.py
+uv run fastapi dev main.py --port 8001
 ```
 
-打开 `http://127.0.0.1:8000/docs` 查看和调用接口。启动时如果配置缺失或格式有误，服务会直接报错并指出相应字段。
+打开 `http://127.0.0.1:8001/docs` 查看和调用接口。启动时如果配置缺失或格式有误，服务会直接报错并指出相应字段。原业务后端继续占用 `8000`。
 
 默认读取项目根目录的 `settings.local.json`，**不要求设置环境变量**。如需指定其他文件，设置 `APP_CONFIG_FILE`；相对路径从项目根目录计算。环境变量 `APP_SETUP_SECRET`、`MODEL_CREDENTIAL_KEY`、`APP_DB_PATH` 可以逐项覆盖文件中的 `setup_secret`、`credential_key`、`database_path`。数据库相对路径从配置文件所在目录计算。
 
 ## 接口说明
 
-本地服务地址为 `http://127.0.0.1:8000`，请求体和响应体均为 JSON（`204` 响应没有响应体）。`GET /` 无需鉴权，返回 `{"message":"Content Security LLM"}`。`/api/auth/token` 下的令牌创建与状态接口使用 `X-Setup-Secret`；其余 `/api` 接口都需要 `Authorization: Bearer <访问令牌>`。可在 `/docs` 中交互式调用。
+本地服务地址为 `http://127.0.0.1:8001`，请求体和响应体均为 JSON（`204` 响应没有响应体）。`GET /` 无需鉴权，返回 `{"message":"Content Security LLM"}`。`/api/auth/token` 下的令牌创建与状态接口使用 `X-Setup-Secret`；其余 `/api` 接口都需要 `Authorization: Bearer <访问令牌>`。可在 `/docs` 中交互式调用。
 
 推荐调用顺序：创建访问令牌 → 添加模型 → 查询可用结果类型 → 调用模型 → 查询调用记录。时间字段为带时区的 ISO 8601 字符串，下面示例均使用 UTC。
 
@@ -269,4 +269,32 @@ uv run python -m service.governance_worker
 
 本服务无需 MySQL 即可启动和创建任务。未配置连接、连接失败、数据集版本不匹配或无记录时，worker 将任务标记为 `failed`，不会调用模型。业务库的 `dataset_records` 没有版本字段，因此当前版本匹配后会读取该数据集的全部记录，包括可能在旧版本接入的记录。业务库连接建议使用只具有 `datasets` 和 `dataset_records` 查询权限的账号；连接参数仅保存在本项目 SQLite，不进入任务请求或结果。治理任务、逐条模型输出和结果快照仍写入本项目 SQLite；业务后端可通过现有只读结果接口获取。真实业务库连接尚未提供，自动化测试用模拟连接验证。
 
-本次不提供数据资源、options、KPI、人工复核、change-sets 或导出接口。现有前端仍请求业务后端，尚未把这些新路由的流量切到本服务。将来切流时，异常和风险页面还需在 `pending` 状态下继续轮询。
+### 旧前端接入契约
+
+已按前端提供的《数据治理三模块接口清单》对齐分析、查询和导出，逐项对应及返回字段见 [前端契约.md](前端契约.md)。三方职责及修改原因分别见 [业务后端对接说明.md](业务后端对接说明.md) 和 [前端对接说明.md](前端对接说明.md)。用户确认模型结果继续只读。错误 `kind` 返回 HTTP 400；结果类型或令牌不匹配返回 404。不传 `kind` 的已有只读调用按路由类型处理，共享方案查询和价值任务查询仍需显式传入。
+
+本项目保持独立模型服务，不转发业务接口，不修改外部前端或原业务后端。调用方将模型请求发送到 `/llm-api/v1`，代理到 `http://127.0.0.1:8001` 并将 `/llm-api` 重写为 `/api`。例如 `/llm-api/v1/data-governance/risk-tasks` 对应本服务 `/api/v1/data-governance/risk-tasks`。部署服务器也需配置相同代理规则。
+
+清单第一部分的数据集、版本目录、资源样本三个接口全部归原业务后端 `8000`，本项目不提供 `/api/v1/datasets` 下的资源接口。接入、处理、业务任务中心等请求也继续走原业务后端。本服务 `/api/v1/tasks` 只接收价值分析任务，不能把所有业务任务请求切过来。资源目录应提供真实数据集 ID 和当前版本；模型接入使用 `language=all`。客户端使用本服务已签发的访问令牌，不能使用业务登录令牌、管理员初始化密钥或上游模型密钥。
+
+以下接口补齐旧治理页面的只读请求，均需 Bearer 令牌并返回治理响应包裹：
+
+| 方法与 `/api/v1` 后的路径 | 用途 |
+| --- | --- |
+| `GET /data-governance/options?kind=governance-value` | 价值方案 `general-v1/general-v2`。 |
+| `GET /data-governance/options?kind=governance-anomaly` | 异常方案 `anomaly-basic-v1`，只展示现有标签异常能力。 |
+| `GET /data-governance/risk-options` | 风险方案 `risk-v1`、分级、筛选及只读动作；数据集由业务目录补入。 |
+| `GET /kpis?kind=governance-value` | 当前令牌的价值结果统计。 |
+| `GET /overview?kind=governance-anomaly` 或 `/data-governance/anomaly-results/overview` | 当前令牌的异常检测统计。 |
+| `GET /data-governance/risk-overview` | 当前令牌的风险统计和结果记录。 |
+| `POST /data-governance/risk-results/{id}/export` | 请求体包含 `keyword/level/status`，返回全部匹配样本，保留风险文本遮蔽。 |
+| `GET /risk-knowledge?result_id=结果ID&sample_id=样本ID&keyword=关键词` | 筛选该风险样本快照中的规则。 |
+| `GET /data-governance/change-sets/current` | 携带完整范围参数，返回 `data=null`，供旧只读页面初始化。 |
+
+统计只包含当前令牌的保存结果，同一数据集版本取最近一次分析，不重复累加任务；价值均分按有效样本加权。统计不代表业务平台全部语料。异常待复核工单与已修复数量为零，本服务没有对应业务流程。
+
+三类页面直接显示所属模型结果的保存样本，校验结果 `scope` 与请求范围，以及样本的 `dataset_id/version_id` 与所属结果一致。价值样本的两个范围字段仅在 HTTP 响应补充，不修改快照。模型模式不再调用原资源样本接口比较正文：原接口读取旧业务任务快照，不能校验本项目模型正文。历史内容按结果 ID 读取，不用当前业务正文替换；风险页保留遮蔽文本。所有结果查询和导出均读取 SQLite，不重新调用模型或读取业务 MySQL。
+
+风险结果汇总的只读动作是 `viewTask/export`，样本不开放复核动作。异常候选审批、修改集校验/发布、风险复核的 POST 请求明确返回 `405` 和“当前模型结果仅支持分析查看”。模型结果不写入业务任务中心，不应用异常建议，也不发布业务版本。
+
+调用方需启用真实 HTTP 请求，并在 `pending`、`running` 时持续轮询；`succeeded` 后使用 `result_id` 读取结果，`failed` 时显示 `error_message`。未启动 worker 时任务保持 `pending`；令牌无效返回 `401`，不自动回退模拟结果。使用保存结果正文、停止页面离开后的轮询和隐藏写操作由调用方处理。本项目没有修改这些前端行为。
