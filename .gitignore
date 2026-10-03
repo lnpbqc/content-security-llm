@@ -9,6 +9,9 @@ wheels/
 # Virtual environments
 .venv
 .pytest_cache/
+.uv-cache/
+.python-runtime/
+db/training-runs/
 
 # Local database and secrets
 db/*.sqlite3
@@ -18,5 +21,7 @@ settings.local.json
 tests/**
 
 !tests/test_governance.py
+!tests/test_training.py
+!tests/test_business_users.py
 docs/
 !/tests/test.http

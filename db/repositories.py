@@ -162,45 +162,70 @@ class AuthRepository:
     def set_enabled(self, token_hash: str, enabled: bool) -> Optional[AuthRecord]:
         with self.database.connect() as connection:
             cursor = connection.execute(
-                "UPDATE auth_tokens SET enabled = ? WHERE token_hash = ?",
+                "UPDATE auth_tokens SET enabled = ? WHERE token_hash = ? AND deleted_at IS NULL",
                 (int(enabled), token_hash),
             )
             if cursor.rowcount == 0:
                 return None
         return self.get_by_hash(token_hash)
 
+    def set_enabled_by_id(self, token_id: str, enabled: bool) -> Optional[AuthRecord]:
+        """管理员按列表中的令牌 ID 启停，无需令牌原文。"""
+        with self.database.connect() as connection:
+            cursor = connection.execute(
+                "UPDATE auth_tokens SET enabled = ? WHERE id = ? AND deleted_at IS NULL",
+                (int(enabled), token_id),
+            )
+            if cursor.rowcount == 0:
+                return None
+        return self.get(token_id)
+
     def set_all_enabled(self, enabled: bool) -> int:
         with self.database.connect() as connection:
             cursor = connection.execute(
-                "UPDATE auth_tokens SET enabled = ?", (int(enabled),)
+                "UPDATE auth_tokens SET enabled = ? WHERE deleted_at IS NULL", (int(enabled),)
             )
             return cursor.rowcount
 
     def get(self, token_id: str) -> Optional[AuthRecord]:
         with self.database.connect() as connection:
             row = connection.execute(
-                "SELECT * FROM auth_tokens WHERE id = ?", (token_id,)
+                "SELECT * FROM auth_tokens WHERE id = ? AND deleted_at IS NULL", (token_id,)
             ).fetchone()
         return self._from_row(row) if row is not None else None
 
     def get_by_hash(self, token_hash: str) -> Optional[AuthRecord]:
         with self.database.connect() as connection:
             row = connection.execute(
-                "SELECT * FROM auth_tokens WHERE token_hash = ?", (token_hash,)
+                "SELECT * FROM auth_tokens WHERE token_hash = ? AND deleted_at IS NULL",
+                (token_hash,),
             ).fetchone()
         return self._from_row(row) if row is not None else None
 
     def list(self) -> List[AuthRecord]:
         """列出令牌元数据，供管理员为旧令牌补充标签。"""
         with self.database.connect() as connection:
-            rows = connection.execute("SELECT * FROM auth_tokens ORDER BY created_at DESC, id DESC").fetchall()
+            rows = connection.execute(
+                "SELECT * FROM auth_tokens WHERE deleted_at IS NULL ORDER BY created_at DESC, id DESC"
+            ).fetchall()
         return [self._from_row(row) for row in rows]
+
+    def soft_delete(self, token_id: str) -> bool:
+        """立即禁用并隐藏令牌，保留令牌行供历史调用关联。"""
+        with self.database.connect() as connection:
+            cursor = connection.execute(
+                "UPDATE auth_tokens SET enabled = 0, deleted_at = ? "
+                "WHERE id = ? AND deleted_at IS NULL",
+                (utc_now().isoformat(), token_id),
+            )
+        return cursor.rowcount > 0
 
     def set_label_if_empty(self, token_id: str, label: str) -> bool:
         """仅为未标注的令牌设置标签，避免历史调用归属被改写。"""
         with self.database.connect() as connection:
             cursor = connection.execute(
-                "UPDATE auth_tokens SET label = ? WHERE id = ? AND label = ''", (label, token_id)
+                "UPDATE auth_tokens SET label = ? WHERE id = ? AND label = '' AND deleted_at IS NULL",
+                (label, token_id),
             )
         return cursor.rowcount > 0
 

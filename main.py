@@ -14,15 +14,19 @@ from db.database import Database
 from db.governance import GovernanceRepository
 from db.governance_config import GovernanceConfigRepository
 from db.repositories import AuthRepository
+from db.training import TrainingRepository
 from llm.models import ModelManager
 from router import api_router
 from router.governance import router as governance_router
 from router.governance_admin import router as governance_admin_router
 from router.governance_frontend import router as governance_frontend_router
+from router.training import router as training_router
 from service.auth import AuthService
+from service.business_users import BusinessUserService
 from service.inference import InferenceService
 from service.governance import GovernanceService
 from service.governance_data import BusinessGovernanceData
+from service.training import TrainingService
 from utils.time import utc_now
 
 
@@ -42,6 +46,7 @@ def create_app(
         application.state.auth_service = AuthService(
             AuthRepository(database), runtime_settings.setup_secret
         )
+        application.state.business_user_service = BusinessUserService(runtime_settings.business_api_base_url)
         application.state.model_manager = ModelManager(
             database,
             runtime_settings.credential_key,
@@ -49,6 +54,7 @@ def create_app(
             cipher=cipher,
         )
         application.state.inference_service = InferenceService(application.state.model_manager)
+        application.state.training_service = TrainingService(TrainingRepository(database))
         governance_config = GovernanceConfigRepository(database)
         application.state.governance_config = governance_config
         application.state.governance_service = GovernanceService(
@@ -63,6 +69,7 @@ def create_app(
     application.include_router(governance_frontend_router)
     application.include_router(governance_router)
     application.include_router(governance_admin_router)
+    application.include_router(training_router)
 
     @application.exception_handler(HTTPException)
     async def governance_http_error(request: Request, exc: HTTPException):

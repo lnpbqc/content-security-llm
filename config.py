@@ -7,6 +7,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict
+from urllib.parse import urlsplit
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -36,7 +37,7 @@ def _read_config(path: Path) -> Dict[str, Any]:
     if not isinstance(data, dict):
         raise RuntimeError("Config file must contain a JSON object")
     unknown = set(data) - {"setup_secret", "credential_key", "database_path", "governance_model_ids",
-                           "business_database_url"}
+                           "business_database_url", "business_api_base_url"}
     if unknown:
         raise RuntimeError("Unknown config fields: {}".format(", ".join(sorted(unknown))))
     return data
@@ -46,6 +47,7 @@ class Settings:
     database_path: Path
     setup_secret: str
     credential_key: bytes
+    business_api_base_url: str = "http://127.0.0.1:8000/api/v1"
 
     @classmethod
     def load(cls) -> "Settings":
@@ -72,8 +74,21 @@ class Settings:
         database_path = Path(database_value).expanduser()
         if not database_path.is_absolute():
             database_path = path.parent / database_path
+        business_api_base_url = data.get("business_api_base_url", "http://127.0.0.1:8000/api/v1")
+        try:
+            if not isinstance(business_api_base_url, str):
+                raise ValueError
+            business_api_base_url = business_api_base_url.strip().rstrip("/")
+            parsed = urlsplit(business_api_base_url)
+            if (parsed.scheme not in {"http", "https"} or not parsed.hostname
+                    or parsed.username or parsed.password or parsed.query or parsed.fragment):
+                raise ValueError
+            parsed.port
+        except ValueError as exc:
+            raise RuntimeError("business_api_base_url must be an HTTP(S) base URL without credentials, query or fragment") from exc
         return cls(
             database_path=database_path.resolve(),
             setup_secret=setup_secret,
             credential_key=credential_key,
+            business_api_base_url=business_api_base_url,
         )

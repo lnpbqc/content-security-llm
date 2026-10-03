@@ -89,7 +89,8 @@ class Database:
                     label TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
                     expires_at TEXT NOT NULL,
-                    enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1))
+                    enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+                    deleted_at TEXT
                 );
 
                 CREATE TABLE IF NOT EXISTS governance_model_bindings (
@@ -107,11 +108,55 @@ class Database:
                     encrypted_password TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS training_tasks (
+                    id TEXT PRIMARY KEY,
+                    token_hash TEXT NOT NULL,
+                    config_json TEXT NOT NULL,
+                    source_hash TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN
+                        ('pending', 'running', 'canceling', 'canceled', 'succeeded', 'failed')),
+                    epoch INTEGER NOT NULL DEFAULT 0,
+                    step INTEGER NOT NULL DEFAULT 0,
+                    progress REAL NOT NULL DEFAULT 0,
+                    latest_metrics_json TEXT NOT NULL DEFAULT '{}',
+                    runtime_json TEXT NOT NULL DEFAULT '{}',
+                    error_message TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    started_at TEXT,
+                    finished_at TEXT
+                );
+                CREATE INDEX IF NOT EXISTS ix_training_tasks_token_created
+                    ON training_tasks(token_hash, created_at DESC);
+                CREATE TABLE IF NOT EXISTS training_metrics (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id TEXT NOT NULL REFERENCES training_tasks(id),
+                    epoch INTEGER NOT NULL,
+                    step INTEGER NOT NULL,
+                    phase TEXT NOT NULL CHECK(phase IN ('train', 'validation')),
+                    metrics_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS ix_training_metrics_task_id ON training_metrics(task_id, id);
+                CREATE TABLE IF NOT EXISTS training_artifacts (
+                    id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL REFERENCES training_tasks(id),
+                    filename TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    epoch INTEGER,
+                    loss REAL,
+                    size INTEGER NOT NULL,
+                    sha256 TEXT NOT NULL,
+                    UNIQUE(task_id, filename)
+                );
                 """
             )
             columns = {row["name"] for row in connection.execute("PRAGMA table_info(auth_tokens)")}
             if "label" not in columns:
                 connection.execute("ALTER TABLE auth_tokens ADD COLUMN label TEXT NOT NULL DEFAULT ''")
+            if "deleted_at" not in columns:
+                connection.execute("ALTER TABLE auth_tokens ADD COLUMN deleted_at TEXT")
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:

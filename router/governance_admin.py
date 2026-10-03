@@ -7,9 +7,10 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from llm.models import ModelNotFoundError
 from router.governance import success
-from schemas.auth import AdminTokenPublic
+from schemas.auth import AdminTokenPublic, TokenStatusUpdate
 from schemas.calls import CallPublic
 from service.auth import InvalidSetupSecretError
+from service.business_users import BusinessUsersTimeoutError, BusinessUsersUnavailableError
 
 
 router = APIRouter(prefix="/api/v1/admin", tags=["governance-admin"])
@@ -47,6 +48,20 @@ def require_admin(request: Request, x_setup_secret: Optional[str] = Header(defau
         request.app.state.auth_service._require_setup_secret(x_setup_secret)
     except InvalidSetupSecretError as exc:
         raise HTTPException(403, detail={"code": "invalid_setup_secret"}) from exc
+
+
+@router.get("/business-users", dependencies=[Depends(require_admin)])
+def list_business_users(request: Request, page: int = Query(default=1, ge=1),
+                        page_size: int = Query(default=20, ge=1, le=100),
+                        keyword: Optional[str] = Query(default=None)):
+    """读取原业务用户目录，供管理端选择独立模型令牌的持有人。"""
+    try:
+        result = request.app.state.business_user_service.list_users(page, page_size, keyword)
+    except BusinessUsersTimeoutError as exc:
+        raise HTTPException(504, detail={"message": str(exc)}) from exc
+    except BusinessUsersUnavailableError as exc:
+        raise HTTPException(502, detail={"message": str(exc)}) from exc
+    return success(request, result)
 
 
 @router.get("/governance/models", dependencies=[Depends(require_admin)])
@@ -95,6 +110,23 @@ def list_tokens(request: Request):
     records = request.app.state.auth_service.repository.list()
     return success(request, [AdminTokenPublic.from_record(record).model_dump(mode="json")
                              for record in records])
+
+
+@router.patch("/tokens/{token_id}/status", dependencies=[Depends(require_admin)])
+def set_token_status_by_id(request: Request, token_id: str, payload: TokenStatusUpdate):
+    """按令牌 ID 启用或禁用，并返回管理员可见的最新状态。"""
+    record = request.app.state.auth_service.repository.set_enabled_by_id(token_id, payload.enabled)
+    if record is None:
+        raise HTTPException(404, detail={"code": "token_not_found"})
+    return success(request, AdminTokenPublic.from_record(record).model_dump(mode="json"))
+
+
+@router.delete("/tokens/{token_id}", dependencies=[Depends(require_admin)])
+def delete_token(request: Request, token_id: str):
+    """软删指定令牌，并保留历史调用可关联的令牌元数据。"""
+    if not request.app.state.auth_service.repository.soft_delete(token_id):
+        raise HTTPException(404, detail={"code": "token_not_found"})
+    return success(request, {"id": token_id, "deleted": True})
 
 
 @router.patch("/tokens/{token_id}/label", dependencies=[Depends(require_admin)])

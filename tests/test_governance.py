@@ -484,6 +484,70 @@ def test_admin_calls_identify_token_without_disclosing_it(app_client):
     assert client.get("/api/v1/admin/calls", headers=headers()).status_code == 403
 
 
+def test_admin_changes_token_status_by_id_without_token_text(app_client):
+    """验证管理员凭列表 ID 停用和恢复令牌，无需知道原文。"""
+    app, client, _, _ = app_client
+    admin = {"X-Setup-Secret": "s" * 32}
+    tokens = client.get("/api/v1/admin/tokens", headers=admin).json()["data"]
+    token_id = next(row["id"] for row in tokens if row["label"] == "前端")
+    path = "/api/v1/admin/tokens/" + token_id + "/status"
+
+    assert client.patch(path, json={"enabled": False}).status_code == 403
+    assert client.patch(path, headers=headers(), json={"enabled": False}).status_code == 403
+    disabled = client.patch(path, headers=admin, json={"enabled": False})
+    assert disabled.status_code == 200
+    assert disabled.json()["data"]["id"] == token_id
+    assert disabled.json()["data"]["enabled"] is False
+    assert "token_hash" not in disabled.json()["data"]
+    assert client.get("/api/models", headers=headers()).status_code == 401
+    assert client.get("/api/models", headers=headers("b")).status_code == 200
+
+    enabled = client.patch(path, headers=admin, json={"enabled": True})
+    assert enabled.status_code == 200
+    assert enabled.json()["data"]["enabled"] is True
+    assert client.get("/api/models", headers=headers()).status_code == 200
+    assert client.patch("/api/v1/admin/tokens/missing/status", headers=admin,
+                        json={"enabled": False}).status_code == 404
+    assert client.patch(path, headers=admin, json={"enabled": "invalid"}).status_code == 422
+
+    legacy = client.patch("/api/auth/token/status", headers=admin,
+                          json={"token": "b" * 32, "enabled": False})
+    assert legacy.status_code == 200
+    assert legacy.json()["enabled"] is False
+
+
+def test_admin_soft_deletes_token_and_keeps_call_attribution(app_client):
+    """验证按 ID 软删令牌后无法恢复，历史调用仍保留归属。"""
+    app, client, model_id, _ = app_client
+    admin = {"X-Setup-Secret": "s" * 32}
+    token_id = next(row["id"] for row in client.get("/api/v1/admin/tokens", headers=admin)
+                    .json()["data"] if row["label"] == "前端")
+    response = client.post("/api/llm/invoke", headers=headers(),
+                           json={"model_id": model_id, "input": "hello", "response_type": "text_answer"})
+    assert response.status_code == 200
+    path = "/api/v1/admin/tokens/" + token_id
+
+    assert client.delete(path).status_code == 403
+    assert client.delete(path, headers=headers()).status_code == 403
+    deleted = client.delete(path, headers=admin)
+    assert deleted.status_code == 200
+    assert deleted.json()["data"] == {"id": token_id, "deleted": True}
+    assert client.get("/api/models", headers=headers()).status_code == 401
+    assert token_id not in {row["id"] for row in client.get("/api/v1/admin/tokens", headers=admin)
+                            .json()["data"]}
+    assert client.patch(path + "/status", headers=admin, json={"enabled": True}).status_code == 404
+    assert client.patch("/api/auth/token/status", headers=admin,
+                        json={"token": "a" * 32, "enabled": True}).status_code == 404
+    assert client.patch("/api/auth/tokens/status", headers=admin,
+                        json={"enabled": True}).status_code == 200
+    assert client.get("/api/models", headers=headers()).status_code == 401
+    assert client.delete(path, headers=admin).status_code == 404
+
+    calls = client.get("/api/v1/admin/calls", headers=admin).json()["data"]
+    assert calls[0]["token_id"] == token_id
+    assert calls[0]["token_label"] == "前端"
+
+
 def test_existing_auth_table_gains_label_without_losing_tokens(tmp_path):
     """验证已有 SQLite 令牌表在初始化时仅补充标签列。"""
     path = tmp_path / "existing.sqlite3"
@@ -496,8 +560,8 @@ def test_existing_auth_table_gains_label_without_losing_tokens(tmp_path):
     database = Database(path)
     database.initialize()
     with database.connect() as connection:
-        row = connection.execute("SELECT id, label FROM auth_tokens WHERE id = 'old'").fetchone()
-    assert dict(row) == {"id": "old", "label": ""}
+        row = connection.execute("SELECT id, label, deleted_at FROM auth_tokens WHERE id = 'old'").fetchone()
+    assert dict(row) == {"id": "old", "label": "", "deleted_at": None}
 
 
 def test_app_starts_without_mysql_and_worker_marks_task_failed(tmp_path):

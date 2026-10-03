@@ -11,12 +11,13 @@
 | `setup_secret` | 管理员初始化密钥。创建令牌及启用、禁用令牌时放在 `X-Setup-Secret` 请求头。 | 至少 32 个字符的随机字符串；只保存在服务端。 |
 | `credential_key` | 本服务加密、解密 SQLite 中模型 `api_key` 和业务库密码的密钥。它**不参与前端鉴权**，也不是模型服务的 API Key。 | 一次生成的 Fernet 密钥；重启时必须保持不变。 |
 | `database_path` | SQLite 数据库文件的位置；首次启动时自动创建。 | 默认 `db/app.sqlite3` 即可；相对路径按配置文件所在目录解析。 |
+| `business_api_base_url` | 管理员查询业务用户时使用的业务 HTTP 根地址，与治理 MySQL 连接独立。 | 可选，默认 `http://127.0.0.1:8000/api/v1`；使用 HTTP(S) 地址，不包含用户名、密码、查询参数或片段。 |
 
 这几个值不要混用：`setup_secret` 负责签发与管理访问令牌；访问令牌由 `POST /api/auth/token` 的请求体提供，供调用者访问本服务；添加模型时提交的 `api_key` 则用于调用上游模型服务，由 `credential_key` 加密保存。
 
 ## 本地启动
 
-需要 Python 3.9+ 和 `uv`。在项目根目录依次执行：
+需要 Python 3.11 和 `uv`。在项目根目录依次执行：
 
 ```powershell
 uv sync
@@ -84,6 +85,10 @@ uv run fastapi dev main.py --port 8001
 
 - `PATCH /api/auth/token/status` 请求体为 `{"token":"令牌原文","enabled":false}`（启用时设为 `true`），只修改该令牌，返回 `created_at`、`expires_at` 和最新 `enabled`；令牌不存在返回 `404 token_not_found`。
 - `PATCH /api/auth/tokens/status` 请求体为 `{"enabled":false}`（启用时设为 `true`），修改**当前已创建的全部令牌**，返回 `{"enabled":false,"updated_count":2}`；没有令牌时 `updated_count` 为 `0`。之后新建的令牌仍默认启用。
+
+管理端单枚令牌启停应使用 `PATCH /api/v1/admin/tokens/{id}/status`，请求头 `X-Setup-Secret`，请求体为 `{"enabled":false}`（启用时为 `true`）。`id` 来自 `GET /api/v1/admin/tokens`；响应的 `data` 含 `id`、`label`、`created_at`、`expires_at`、`enabled`，无需令牌原文。旧的按原文接口保留供现有调用兼容。
+
+删除令牌使用 `DELETE /api/v1/admin/tokens/{id}`，同样只需 `X-Setup-Secret`，成功返回 `data:{"id":"...","deleted":true}`。这是软删除：令牌立即不能用于新请求，且不再出现在管理员令牌列表；历史调用记录仍能显示原令牌 ID 和标签。已删除令牌不能通过单枚或批量启用接口恢复，再次删除返回 `404`；其原文也不能重新创建为新令牌。
 
 被禁用的令牌访问其他接口会收到 `401 invalid_token`；重新启用后，只有尚未过期的令牌能恢复使用。缺少或填错初始化密钥返回 `403 invalid_setup_secret`。旧状态接口仍通过令牌原文定位令牌。
 
@@ -247,9 +252,16 @@ uv run pytest
 | `GET /api/v1/admin/governance/models` | 查询当前三类任务的模型绑定。 |
 | `PUT /api/v1/admin/governance/business-database` | `{"host":"主机","port":3306,"database":"库名","username":"只读用户","password":"密码"}`；保存时加密密码，不立即连库。 |
 | `GET /api/v1/admin/governance/business-database` | 查询连接元数据；不返回密码或密文。未配置时 `data` 为 `null`。 |
+| `GET /api/v1/admin/business-users?page=1&page_size=20&keyword=张` | 使用管理员密钥查询业务用户目录；服务端访问业务后端已有的 `/api/v1/users`。 |
 | `GET /api/v1/admin/tokens` | 查询令牌 ID、持有人或用途标签及状态，不返回令牌原文或哈希。 |
+| `PATCH /api/v1/admin/tokens/{id}/status` | `{"enabled":false}` 或 `true`；管理员按列表 ID 启停单枚令牌。 |
+| `DELETE /api/v1/admin/tokens/{id}` | 按列表 ID 软删除令牌；立即失效并从令牌列表隐藏，保留历史调用归属。 |
 | `PATCH /api/v1/admin/tokens/{id}/label` | `{"label":"持有人或用途"}`；只允许给空标签的旧令牌补一次，避免历史记录换名。 |
 | `GET /api/v1/admin/calls?limit=50&offset=0` | 跨令牌查询调用记录及 `token_id`、`token_label`。 |
+
+业务用户查询返回分页对象，用户字段限定为 `id/username/display_name/role/enabled`，业务接口 `status=normal` 映射为启用，其他状态映射为停用。请求超时为 5 秒；连接失败、上游非成功响应或格式错误返回 `502`，超时返回 `504`，空列表正常返回。管理员密钥和模型令牌不会转发给业务后端，查询失败不影响已有模型访问。
+
+管理端选中用户后，可生成独立模型令牌，通过现有 `POST /api/auth/token` 登记，并使用 `business-user:<用户ID>` 标签标记持有人。标签不构成业务登录身份绑定，业务账号停用不会自动禁用模型令牌。令牌列表只查询元数据；单枚启停仍通过 `PATCH /api/auth/token/status` 输入令牌原文。具体管理端修改意见、接口示例及验收见 [管理端业务用户授权对接说明.md](管理端业务用户授权对接说明.md)。本项目没有修改管理端、业务前端或业务后端代码。
 
 任务模型绑定和业务库连接均保存在本项目 SQLite。密码用 `credential_key` 加密；重启时须使用相同密钥。旧配置文件中的 `governance_model_ids` 和 `business_database_url` 暂被接受但不再生效，应通过上述接口重新配置。未配置模型或模型已删除时，创建对应任务返回 `503`。启动 API 后，另起一个进程执行：
 
@@ -298,3 +310,15 @@ uv run python -m service.governance_worker
 风险结果汇总的只读动作是 `viewTask/export`，样本不开放复核动作。异常候选审批、修改集校验/发布、风险复核的 POST 请求明确返回 `405` 和“当前模型结果仅支持分析查看”。模型结果不写入业务任务中心，不应用异常建议，也不发布业务版本。
 
 调用方需启用真实 HTTP 请求，并在 `pending`、`running` 时持续轮询；`succeeded` 后使用 `result_id` 读取结果，`failed` 时显示 `error_message`。未启动 worker 时任务保持 `pending`；令牌无效返回 `401`，不自动回退模拟结果。使用保存结果正文、停止页面离开后的轮询和隐藏写操作由调用方处理。本项目没有修改这些前端行为。
+
+## 自定义 PyTorch 训练
+
+`/api/v1/training` 提供可信 Python 源码的异步训练、逐步指标查询、取消和权重下载。`GET /api/v1/training/defaults` 返回默认参数和完整请求示例；`POST /api/v1/training/tasks` 接收源码、业务数据集 ID/当前版本和张量契约，HTTP 202 返回排队任务。请求只检查源码语法，不执行源码；后台单实例训练 worker 负责独立进程中的真实训练：
+
+```powershell
+uv run python -m service.training_worker
+```
+
+该 worker 与治理 worker 独立，API、worker 共享 SQLite 和业务库管理员配置。项目使用 Python 3.11，PyTorch 官方 CUDA 12.8 构建及指标依赖由 `uv.lock` 固定。默认 80%/20% 划分、AdamW、10 个 epoch，每步记录 loss，每轮记录验证 loss 和 precision/accuracy/F1/recall；分类指标不适用时返回 null。产物在 SQLite 同目录的 `training-runs` 中，包含源码、数据/划分快照、配置、环境、日志、最后和最优权重。
+
+具体参数、Python 函数契约、接口及现有 Vue 训推页面的字段映射见 [训练后端与前端对接说明](训练后端与前端对接说明.md)。完整分类及自定义训练请求示例通过 `GET /api/v1/training/defaults` 获取。上传代码只适用于可信开发者，训练进程不是安全沙箱。本次没有修改外部前端或业务后端；前端需按说明改用真实训练接口。
