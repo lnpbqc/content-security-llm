@@ -1,6 +1,7 @@
 """只读查询业务 MySQL 中的数据集与原始记录，并提供治理规则。"""
 
 import json
+import logging
 import re
 from typing import Any, Callable, Dict, List, Optional
 
@@ -43,11 +44,13 @@ class BusinessGovernanceData:
     """从业务库读取数据，规则暂沿用本服务的固定治理方案。"""
 
     def __init__(self, config: GovernanceConfigRepository, cipher: Any,
-                 connection_factory: Optional[Callable[..., Any]] = None):
+                 connection_factory: Optional[Callable[..., Any]] = None,
+                 mock_samples: bool = False):
         """保存 SQLite 配置入口；测试可注入模拟数据库连接。"""
         self.config = config
         self.cipher = cipher
         self.connection_factory = connection_factory or _connect_mysql
+        self.mock_samples = mock_samples
         self._names = {}
 
     def _connect(self):
@@ -121,7 +124,14 @@ class BusinessGovernanceData:
         finally:
             connection.close()
         if not rows:
-            raise ValueError("数据集没有可治理的记录")
+            if not self.mock_samples:
+                raise ValueError("数据集没有可治理的记录")
+            # TODO: 业务后端完成文件解析入库并通过真实联调后，移除此临时分支。
+            logging.getLogger(__name__).warning(
+                "数据集 %s 版本 %s 无真实记录，使用临时模拟数据，非上传文件内容",
+                dataset_id, version_id,
+            )
+            rows = self._mock_rows(dataset_id, version_id)
         samples = []
         for row in rows:
             payload = row["payload"]
@@ -143,6 +153,26 @@ class BusinessGovernanceData:
             })
         self._names[(dataset_id, version_id)] = dataset["name"]
         return samples
+
+    def _mock_rows(self, dataset_id: int, version_id: str) -> List[Dict[str, Any]]:
+        """仅为尚未入库的数据集提供有明确来源标记的固定联调记录。"""
+        examples = [
+            ("跨文化交流", "交流活动中，参与者介绍各自的节日习俗，并讨论如何尊重文化差异。", "文化"),
+            ("社区节庆", "社区通过节庆活动记录地方习俗与文化传承。", "体育"),
+            ("虚构账户信息", "虚构演示记录：用户ID：10086；注册时间：2026/9/20。", "综合"),
+            ("节日习俗交流", "同学分别介绍春节与开斋节的家庭活动，并共同讨论节日中的团聚与分享。", "文化"),
+            ("地方技艺访谈", "口述访谈记录手工技艺的学习过程与文化传承，保留不同代际的表达方式。", "体育"),
+            ("跨语言礼貌表达", "翻译练习比较不同语言中的问候与请求表达，说明使用场景和礼貌程度。", "教育"),
+            ("校园饮食交流", "校园食堂邀请学生分享家乡饮食习惯，并通过清晰的食材标注尊重个人选择。", "文化"),
+            ("基础问答", "问题：2 加 3 等于多少？回答：2 加 3 等于 5。", "教育"),
+            ("虚构账户展示", "虚构演示记录：用户ID：20002；注册时间：2026/9/21；账户字段拟用于公开展示。", "综合"),
+            ("虚构消息核验", "虚构演示消息：有人声称某地交流活动已取消，但没有提供主办方公告或可核验出处。", "新闻"),
+        ]
+        return [{"id": "mock-{}-{}-{}".format(dataset_id, version_id, index),
+                 "payload": {"title": title, "text": text, "topic_label": label,
+                             "language": "zh", "is_mock": True,
+                             "source": "临时模拟数据（非上传文件内容）"}}
+                for index, (title, text, label) in enumerate(examples, 1)]
 
     def _record_text(self, payload: Dict[str, Any]) -> str:
         """按字段名升序拼接全部原始字段，嵌套值使用稳定 JSON。"""

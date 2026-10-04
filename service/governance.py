@@ -97,6 +97,9 @@ class GovernanceService:
             return
         result_id = str(uuid4())
         summary, public_samples = self._snapshot(task, policy, samples, outcomes, result_id)
+        if any(sample["id"].startswith("mock-") and sample["metadata"].get("is_mock") is True
+               for sample in samples):
+            summary["data_source"] = "mock"
         self.repository.publish(task, summary, public_samples, result_id=result_id)
 
     def _model_input(self, kind: str, sample: Dict[str, Any], policy: Dict[str, Any]) -> Dict[str, Any]:

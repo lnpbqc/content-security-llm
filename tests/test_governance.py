@@ -174,6 +174,123 @@ def app_client(tmp_path: Path):
         yield app, client, models["governance-value"], business
 
 
+@pytest.mark.parametrize("kind,scheme,name", [
+    ("governance-value", "general-v1", "value"),
+    ("governance-anomaly", "anomaly-basic-v1", "anomaly"),
+    ("governance-risk", "risk-v1", "risk"),
+])
+def test_empty_dataset_mock_samples_publish_marked_snapshots(app_client, kind, scheme, name):
+    """临时空记录样本经过三类模型校验，并保留来源和范围。"""
+    app, client, _, business = app_client
+    service = app.state.governance_service
+    service.data.mock_samples = True
+    business.records[3] = []
+    samples = service.data.samples(scope(scheme))
+    assert len(samples) == 10
+    assert len({row["id"] for row in samples}) == 10
+    assert all(row["id"].startswith("mock-3-v1.0.0-") for row in samples)
+    assert all(row["dataset_id"] == 3 and row["version_id"] == "v1.0.0" for row in samples)
+    assert all(row["metadata"]["is_mock"] and "临时模拟数据" in row["text"] for row in samples)
+    assert service.data.dataset_name(3, "v1.0.0") == "业务数据集 3"
+    task = create(client, kind, scheme)
+    task_id = task.get("task_id") or task["id"]
+    assert service.run_once()
+    saved = service.repository.get_task(task_id)
+    assert saved["status"] == "succeeded", saved
+    assert len(FakeCompletionClient.calls) == 10
+    base = "/api/v1/data-governance/{}-results/{}".format(name, saved["result_id"])
+    summary = client.get(base, headers=headers()).json()["data"]
+    assert summary["data_source"] == "mock"
+    page = client.get(base + "/samples", headers=headers()).json()["data"]
+    assert page["total"] > 0
+    assert all("临时模拟数据" in row["text"] for row in page["items"])
+    paged_items = []
+    for number in range(1, (page["total"] + 1) // 2 + 1):
+        response = client.get(base + "/samples", headers=headers(),
+                              params={"page": number, "page_size": 2})
+        assert response.status_code == 200
+        paged_items.extend(response.json()["data"]["items"])
+    assert len(paged_items) == page["total"]
+    assert {row["id"] for row in paged_items} == {row["id"] for row in page["items"]}
+    if name == "risk":
+        assert "10086" not in json.dumps(page, ensure_ascii=False)
+    # 关闭模拟后发布新的真实结果，旧快照仍明确标记模拟来源。
+    service.data.mock_samples = False
+    business.records[3] = [{"id": 88, "payload": {"text": "真实记录", "language": "zh"}}]
+    task = create(client, kind, scheme)
+    assert service.run_once()
+    real = service.repository.get_task(task.get("task_id") or task["id"])
+    assert real["status"] == "succeeded"
+    assert client.get(base, headers=headers()).json()["data"]["data_source"] == "mock"
+    assert client.get(base + "/samples", headers=headers()).json()["data"] == page
+
+
+def test_mock_samples_never_replace_existing_records(app_client):
+    """开关开启时，仍优先读取真实记录，不修改业务库数据。"""
+    app, _, _, business = app_client
+    data = app.state.governance_service.data
+    data.mock_samples = True
+    rows = data.samples(scope("general-v1"))
+    assert [row["id"] for row in rows] == ["1", "2", "3"]
+    assert all(not row["metadata"].get("is_mock") for row in rows)
+    assert len(business.records[3]) == 3
+
+
+@pytest.mark.parametrize("failure,message", [
+    ("empty", "数据集没有可治理的记录"),
+    ("missing_dataset", "数据集不存在"),
+    ("wrong_version", "数据集版本不匹配"),
+    ("unavailable", "业务数据库连接失败"),
+    ("missing_config", "业务数据库连接未配置"),
+])
+def test_mock_samples_preserve_source_errors(app_client, failure, message):
+    """模拟只对明确开启后的空记录生效，不掩盖其他错误。"""
+    app, _, _, business = app_client
+    data = app.state.governance_service.data
+    data.mock_samples = failure != "empty"
+    business.records[3] = []
+    if failure == "missing_dataset":
+        business.datasets.pop(3)
+    elif failure == "wrong_version":
+        business.datasets[3]["version"] = "v2.0.0"
+    elif failure == "unavailable":
+        business.unavailable = True
+    elif failure == "missing_config":
+        with app.state.database.connect() as connection:
+            connection.execute("DELETE FROM business_database_config")
+    with pytest.raises((ValueError, RuntimeError), match=message):
+        data.samples(scope("general-v1"))
+    assert not FakeCompletionClient.calls
+
+
+def test_mock_settings_default_and_api_wiring(tmp_path, monkeypatch):
+    """配置默认关闭；开启后注入 API 的治理样本读取器。"""
+    path = tmp_path / "settings.json"
+    config = {"setup_secret": "s" * 32, "credential_key": Fernet.generate_key().decode(),
+              "database_path": "mock.sqlite3"}
+    path.write_text(json.dumps(config), encoding="utf-8")
+    monkeypatch.setenv("APP_CONFIG_FILE", str(path))
+    assert Settings.load().governance_mock_samples is False
+    config["governance_mock_samples"] = True
+    path.write_text(json.dumps(config), encoding="utf-8")
+    settings = Settings.load()
+    assert settings.governance_mock_samples is True
+    with TestClient(create_app(settings)) as client:
+        assert client.app.state.governance_service.data.mock_samples is True
+
+
+@pytest.mark.parametrize("value", ["false", "true", 1, None])
+def test_mock_settings_require_boolean(tmp_path, monkeypatch, value):
+    """拒绝看似布尔值的字符串和数字，防止意外开启。"""
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps({"setup_secret": "s" * 32,
+                               "credential_key": Fernet.generate_key().decode(),
+                               "governance_mock_samples": value}), encoding="utf-8")
+    monkeypatch.setenv("APP_CONFIG_FILE", str(path))
+    with pytest.raises(RuntimeError, match="governance_mock_samples must be a boolean"):
+        Settings.load()
+
+
 def headers(token="a"):
     """返回测试请求使用的 Bearer 和追踪请求头。"""
     return {"Authorization": "Bearer " + token * 32, "X-Trace-Id": "trace-test"}

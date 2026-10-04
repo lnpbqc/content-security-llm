@@ -26,7 +26,8 @@ def main() -> None:
     config = GovernanceConfigRepository(database)
     manager = ModelManager(database, settings.credential_key)
     service = GovernanceService(
-        repository, BusinessGovernanceData(config, manager.cipher), manager, config,
+        repository, BusinessGovernanceData(config, manager.cipher,
+                                           mock_samples=settings.governance_mock_samples), manager, config,
     )
     while True:
         worked = service.run_once()

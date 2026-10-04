@@ -2,5 +2,6 @@
   "setup_secret": "REPLACE_WITH_A_RANDOM_SECRET_AT_LEAST_32_CHARS",
   "credential_key": "REPLACE_WITH_A_GENERATED_FERNET_KEY",
   "database_path": "db/app.sqlite3",
-  "business_api_base_url": "http://127.0.0.1:8000/api/v1"
+  "business_api_base_url": "http://127.0.0.1:8000/api/v1",
+  "governance_mock_samples": false
 }

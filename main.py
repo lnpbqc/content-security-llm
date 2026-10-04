@@ -59,7 +59,8 @@ def create_app(
         application.state.governance_config = governance_config
         application.state.governance_service = GovernanceService(
             GovernanceRepository(database),
-            BusinessGovernanceData(governance_config, application.state.model_manager.cipher),
+            BusinessGovernanceData(governance_config, application.state.model_manager.cipher,
+                                   mock_samples=runtime_settings.governance_mock_samples),
             application.state.model_manager, governance_config,
         )
         yield

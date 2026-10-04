@@ -12,6 +12,7 @@
 | `credential_key` | 本服务加密、解密 SQLite 中模型 `api_key` 和业务库密码的密钥。它**不参与前端鉴权**，也不是模型服务的 API Key。 | 一次生成的 Fernet 密钥；重启时必须保持不变。 |
 | `database_path` | SQLite 数据库文件的位置；首次启动时自动创建。 | 默认 `db/app.sqlite3` 即可；相对路径按配置文件所在目录解析。 |
 | `business_api_base_url` | 管理员查询业务用户时使用的业务 HTTP 根地址，与治理 MySQL 连接独立。 | 可选，默认 `http://127.0.0.1:8000/api/v1`；使用 HTTP(S) 地址，不包含用户名、密码、查询参数或片段。 |
+| `governance_mock_samples` | 业务记录为空时，临时为价值、异常、风险治理提供模拟输入样本。 | 可选，默认 `false`；仅接受 JSON 布尔值 `true`/`false`。修改后重启 API 和治理 worker。业务后端完成文件入库后关闭。 |
 
 这几个值不要混用：`setup_secret` 负责签发与管理访问令牌；访问令牌由 `POST /api/auth/token` 的请求体提供，供调用者访问本服务；添加模型时提交的 `api_key` 则用于调用上游模型服务，由 `credential_key` 加密保存。
 
@@ -279,7 +280,35 @@ uv run python -m service.governance_worker
 
 创建请求只包含 `kind`、`name`、`input: {dataset_id, version_id, language, scheme_id}`，立即返回 `pending`，不需要传样本正文。worker 使用管理员保存的只读连接访问业务后端 MySQL，核对 `datasets.version` 与请求的 `version_id`，按 `dataset_records.id` 升序读取该数据集的全部记录。每条记录的 `payload` 按字段名升序拼成多行 `字段名: 值`；嵌套值采用字段名排序的 JSON。`language` 保留在范围中，目前不筛选记录；行内无语种时模型输入使用 `unknown`。支持的方案为价值 `general-v1`/`general-v2`、异常 `anomaly-basic-v1`、风险 `risk-v1`，规则仍由 `service/governance_data.py` 提供。
 
-本服务无需 MySQL 即可启动和创建任务。未配置连接、连接失败、数据集版本不匹配或无记录时，worker 将任务标记为 `failed`，不会调用模型。业务库的 `dataset_records` 没有版本字段，因此当前版本匹配后会读取该数据集的全部记录，包括可能在旧版本接入的记录。业务库连接建议使用只具有 `datasets` 和 `dataset_records` 查询权限的账号；连接参数仅保存在本项目 SQLite，不进入任务请求或结果。治理任务、逐条模型输出和结果快照仍写入本项目 SQLite；业务后端可通过现有只读结果接口获取。真实业务库连接尚未提供，自动化测试用模拟连接验证。
+本服务无需 MySQL 即可启动和创建任务。默认情况下，未配置连接、连接失败、数据集版本不匹配或无记录时，worker 将任务标记为 `failed`，不会调用模型。业务库的 `dataset_records` 没有版本字段，因此当前版本匹配后会读取该数据集的全部记录，包括可能在旧版本接入的记录。业务库连接建议使用只具有 `datasets` 和 `dataset_records` 查询权限的账号；连接参数仅保存在本项目 SQLite，不进入任务请求或结果。治理任务、逐条模型输出和结果快照仍写入本项目 SQLite；业务后端可通过现有只读结果接口获取。自动化测试用模拟业务库连接验证；真实文件入库、模型调用和浏览器联调需单独验收。
+
+### 临时空记录模拟（TODO：业务文件入库完成后移除）
+
+业务后端的文件接入尚未把正文写入 `dataset_records` 时，可在本项目的 `settings.local.json` 中设置 `"governance_mock_samples": true`。示例配置和缺省值均为 `false`。设置后重启 API 和治理 worker，再创建新任务；之前失败的任务不会自动重试。
+
+2026-10-04：当前开发机的私有 `settings.local.json` 已开启该开关。其他环境需自行设置，复制示例配置仍为关闭状态。保留配置中的已有密钥和数据库路径，仅设置以下字段：
+
+```json
+"governance_mock_samples": true
+```
+
+停止已有 API 和治理 worker 后，在项目根目录的两个终端分别重新启动：
+
+```powershell
+uv run fastapi dev main.py --port 8001
+```
+
+```powershell
+uv run python -m service.governance_worker
+```
+
+随后在前端重新提交价值、异常或风险分析任务。已有失败任务不会因为开关开启而自动恢复。
+
+该开关同时覆盖价值、异常、风险三类治理。仍使用管理员配置的业务 MySQL 连接，校验真实数据集和当前版本；仅记录查询为空时提供十条固定中文演示样本，内容包括跨文化交流、节庆、地方技艺、翻译、校园饮食、基础问答、标签不一致、虚构账户信息和缺少来源的虚构消息。有真实记录时始终使用真实记录；连接失败、查询失败、数据集不存在或版本不匹配仍报错。API/worker 不向业务库写入任何模拟记录，训练数据读取不受此开关影响。
+
+样本 ID 以 `mock-` 开头，正文包含“临时模拟数据（非上传文件内容）”，结果汇总返回 `data_source: "mock"`，worker 日志也明确记录模拟来源。样本仍交给已绑定模型真实执行并通过原有输出校验，不能保证检出异常或风险；不是伪造模型成功结果，也不是上传 CSV 的分析结果。令牌、模型绑定和启动 worker 的要求保持不变。模拟结果会保存为独立历史快照，关闭开关后不会改变已保存的模拟正文。
+
+TODO：业务方完成 CSV 解析和真实入库后，将开关改回 `false`，重启 API/worker，用新任务验证真实样本和三类结果，然后移除临时分支及开关。跟踪见 [待办-治理临时模拟数据.md](待办-治理临时模拟数据.md)。模拟测试不能代替真实文件入库、真实模型或浏览器联调。
 
 ### 旧前端接入契约
 

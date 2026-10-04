@@ -37,7 +37,7 @@ def _read_config(path: Path) -> Dict[str, Any]:
     if not isinstance(data, dict):
         raise RuntimeError("Config file must contain a JSON object")
     unknown = set(data) - {"setup_secret", "credential_key", "database_path", "governance_model_ids",
-                           "business_database_url", "business_api_base_url"}
+                           "business_database_url", "business_api_base_url", "governance_mock_samples"}
     if unknown:
         raise RuntimeError("Unknown config fields: {}".format(", ".join(sorted(unknown))))
     return data
@@ -48,6 +48,7 @@ class Settings:
     setup_secret: str
     credential_key: bytes
     business_api_base_url: str = "http://127.0.0.1:8000/api/v1"
+    governance_mock_samples: bool = False
 
     @classmethod
     def load(cls) -> "Settings":
@@ -86,9 +87,13 @@ class Settings:
             parsed.port
         except ValueError as exc:
             raise RuntimeError("business_api_base_url must be an HTTP(S) base URL without credentials, query or fragment") from exc
+        governance_mock_samples = data.get("governance_mock_samples", False)
+        if not isinstance(governance_mock_samples, bool):
+            raise RuntimeError("governance_mock_samples must be a boolean")
         return cls(
             database_path=database_path.resolve(),
             setup_secret=setup_secret,
             credential_key=credential_key,
             business_api_base_url=business_api_base_url,
+            governance_mock_samples=governance_mock_samples,
         )
