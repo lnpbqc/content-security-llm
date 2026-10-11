@@ -86,6 +86,7 @@ class GovernanceService:
                     validator=lambda value: self._validate(
                         kind, sample, policy, value.model_dump(mode="json")
                     ),
+                    timeout=120, max_retries=0,
                 )
                 output = parsed.model_dump(mode="json")
                 self.repository.save_sample(task["id"], sample["id"], output)
@@ -139,8 +140,8 @@ class GovernanceService:
                 if len(actual) != len(expected) or set(actual) != expected:
                     raise ValueError("评分维度不完整或重复")
                 for dimension in output["dimensions"]:
-                    if not dimension["reason"].strip() or any(
-                        not quote or quote not in sample["text"] for quote in dimension["evidence"]
+                    if not dimension["reason"].strip() or not dimension["evidence"] or any(
+                        not quote.strip() or quote not in sample["text"] for quote in dimension["evidence"]
                     ):
                         raise ValueError("评分理由或证据无效")
             return
@@ -151,7 +152,8 @@ class GovernanceService:
             fields = set(policy["field_whitelist"])
             for finding in output["findings"]:
                 if (finding["ruleId"] not in rules or finding["type"] != "标签异常" or
-                    finding["field"] not in fields or finding["quote"] not in sample["text"] or
+                    finding["field"] not in fields or not finding["quote"].strip() or
+                    finding["quote"] not in sample["text"] or
                     not finding["reason"].strip()):
                     raise ValueError("异常证据或规则无效")
                 for change in finding["fieldChanges"]:

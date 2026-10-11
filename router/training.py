@@ -3,10 +3,13 @@
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import FileResponse
 
-from router.dependencies import require_token
+from router.dependencies import require_admin, require_token
 from router.governance import success
 from schemas.training import TrainingCreate
+from schemas.script_training import (ScriptCatalogEntry, ScriptTaskPublic, ScriptTrainingCreate,
+                                     TrainingLogPage, TrainingResponse)
 from service.training_examples import defaults
+from service.training_scripts import SCRIPTS, prepare_script_task
 
 
 router = APIRouter(prefix="/api/v1/training", tags=["training"], dependencies=[Depends(require_token)])
@@ -21,7 +24,20 @@ def get_defaults(request: Request):
     return success(request, defaults())
 
 
-@router.post("/tasks", status_code=202)
+@router.get("/scripts", response_model=TrainingResponse[list[ScriptCatalogEntry]])
+def get_scripts(request: Request):
+    return success(request, [script.public(script_id) for script_id, script in SCRIPTS.items()])
+
+
+@router.post("/script-tasks", status_code=202, dependencies=[Depends(require_admin)],
+             response_model=TrainingResponse[ScriptTaskPublic])
+def create_script_task(request: Request, payload: ScriptTrainingCreate,
+                       token_hash: str = Depends(require_token), service=Depends(get_service)):
+    task = service.repository.create(prepare_script_task(payload), token_hash)
+    return success(request, service.repository.public(task))
+
+
+@router.post("/tasks", status_code=202, dependencies=[Depends(require_admin)])
 def create_task(request: Request, payload: TrainingCreate,
                 token_hash: str = Depends(require_token), service=Depends(get_service)):
     task = service.repository.create(payload.model_dump(), token_hash)
@@ -51,6 +67,13 @@ def get_metrics(request: Request, task_id: str, after_id: int = Query(0, ge=0),
 def cancel_task(request: Request, task_id: str, token_hash: str = Depends(require_token), service=Depends(get_service)):
     service.get(task_id, token_hash)
     return success(request, service.repository.public(service.repository.cancel(task_id, token_hash)))
+
+
+@router.get("/tasks/{task_id}/logs", response_model=TrainingResponse[TrainingLogPage])
+def get_logs(request: Request, task_id: str, after_offset: int = Query(0, ge=0),
+             limit: int = Query(65536, ge=1, le=1048576), token_hash: str = Depends(require_token),
+             service=Depends(get_service)):
+    return success(request, service.logs(task_id, token_hash, after_offset, limit))
 
 
 @router.get("/tasks/{task_id}/artifacts")

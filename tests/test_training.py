@@ -72,7 +72,7 @@ class RecordsSource:
 
 
 def create(client, **overrides):
-    response = client.post(BASE + "/tasks", headers=HEADERS, json=config(**overrides))
+    response = client.post(BASE + "/tasks", headers={**HEADERS, "X-Setup-Secret": "s" * 32}, json=config(**overrides))
     assert response.status_code == 202, response.text
     return response.json()["data"]
 
@@ -108,7 +108,7 @@ def test_invalid_requests_are_rejected_without_tasks(override, training_client):
     _, client = training_client
     payload = {**example_request(), **override}
     # 非有限 JSON 以原始正文发送，避免 HTTP 客户端提前拒绝。
-    response = client.post(BASE + "/tasks", headers={**HEADERS, "Content-Type": "application/json"},
+    response = client.post(BASE + "/tasks", headers={**HEADERS, "X-Setup-Secret": "s" * 32, "Content-Type": "application/json"},
                            content=json.dumps(payload))
     assert response.status_code == 422
     assert client.get(BASE + "/tasks", headers=HEADERS).json()["data"]["total"] == 0

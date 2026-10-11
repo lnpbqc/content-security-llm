@@ -2,15 +2,23 @@
 
 from typing import Optional
 
-from fastapi import Depends, HTTPException, Request, status
+from fastapi import Depends, Header, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from llm.models import ModelManager
-from service.auth import AuthService
+from service.auth import AuthService, InvalidSetupSecretError
 from service.inference import InferenceService
 
 
 bearer = HTTPBearer(auto_error=False)
+
+
+def require_admin(request: Request, x_setup_secret: Optional[str] = Header(default=None)) -> None:
+    """模型配置及可信代码操作沿用现有管理员密钥，不引入业务角色。"""
+    try:
+        request.app.state.auth_service._require_setup_secret(x_setup_secret)
+    except InvalidSetupSecretError as exc:
+        raise HTTPException(403, detail={"code": "invalid_setup_secret"}) from exc
 
 
 def get_model_manager(request: Request) -> ModelManager:

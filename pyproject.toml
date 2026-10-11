@@ -13,11 +13,15 @@ dependencies = [
     "openai>=1.55",
     "pymysql>=1.1,<2",
     "torch>=2.7,<3",
+    "torchvision>=0.26,<0.27",
     "scikit-learn>=1.5,<2",
 ]
 
 [dependency-groups]
 dev = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 [[tool.uv.index]]
 name = "pytorch-cu128"
@@ -26,3 +30,4 @@ explicit = true
 
 [tool.uv.sources]
 torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }

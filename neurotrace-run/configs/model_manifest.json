@@ -1,0 +1,19 @@
+{
+  "source": "ModelScope",
+  "download_completed_at": "2026-08-06T15:09:15.005559+08:00",
+  "models": {
+    "generation_model": {
+      "model_id": "Qwen/Qwen3-4B",
+      "local_path": "/data/models/Qwen3-4B",
+      "config_sha256": "8ba006f74fecfaaeb392872a60f4a480e7ec9860153d2e1b769ec81f9a147f8a",
+      "tokenizer_config_sha256": "d5d09f07b48c3086c508b30d1c9114bd1189145b74e982a265350c923acd8101"
+    },
+    "embedding_model": {
+      "model_id": "Qwen/Qwen3-Embedding-0.6B",
+      "local_path": "/data/models/Qwen3-Embedding-0.6B",
+      "config_sha256": "b5bf1f51fc45be473a54718cef92448d90a1be001bf9b9a44b8c7f10a19feaa9",
+      "tokenizer_config_sha256": "253153d0738ceb4c668d2eff957714dd2bea0b56de772a9fdccd96cbf517e6a0"
+    }
+  },
+  "note": "Model weights and dependencies are frozen for this experiment week."
+}

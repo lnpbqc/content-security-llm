@@ -9,6 +9,10 @@ from pydantic import BaseModel
 T = TypeVar("T", bound=BaseModel)
 
 
+class StructuredOutputValidationError(ValueError):
+    """服务端固定的语义校验原因；消息不得包含输入、模型正文或凭据。"""
+
+
 def schema_system_prompt(response_model: Type[BaseModel]) -> str:
     schema = json.dumps(response_model.model_json_schema(), ensure_ascii=False)
     return (

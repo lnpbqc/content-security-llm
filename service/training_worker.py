@@ -4,11 +4,11 @@ import argparse
 import json
 import os
 import queue
+import signal
 import subprocess
 import sys
 import threading
 import time
-from contextlib import contextmanager
 from pathlib import Path
 
 from config import PROJECT_ROOT, Settings
@@ -17,34 +17,12 @@ from db.governance_config import GovernanceConfigRepository
 from db.training import TrainingRepository, encode
 from llm.models import ModelManager
 from service.governance_data import BusinessGovernanceData
+from utils.locking import exclusive_lock
 
 
-@contextmanager
 def worker_lock(directory):
     """OS 文件锁确保第二个 worker 不会恢复仍在运行的任务。"""
-    directory.mkdir(parents=True, exist_ok=True)
-    with (directory / "worker.lock").open("a+b") as stream:
-        if stream.seek(0, os.SEEK_END) == 0:
-            stream.write(b"0")
-            stream.flush()
-        stream.seek(0)
-        try:
-            if os.name == "nt":
-                import msvcrt
-                msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
-            else:
-                import fcntl
-                fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError as exc:
-            raise RuntimeError("训练 worker 已运行，只允许单实例") from exc
-        try:
-            yield
-        finally:
-            stream.seek(0)
-            if os.name == "nt":
-                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
-                fcntl.flock(stream, fcntl.LOCK_UN)
+    return exclusive_lock(directory / "worker.lock", "训练 worker 已运行，只允许单实例")
 
 
 class TrainingWorker:
@@ -70,6 +48,10 @@ class TrainingWorker:
         task = self.repository.claim()
         if task is None:
             return False
+        if task["config"].get("runner") == "script":
+            from service.script_training_worker import run_script_task
+            run_script_task(self.repository, task, self.cancel_timeout)
+            return True
         process = None
         directory = self.repository.directory(task["id"])
         try:
@@ -165,6 +147,9 @@ def main():
     parser = argparse.ArgumentParser(description="Process trusted Python training tasks")
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
+    def stop(signum, frame):
+        raise SystemExit(128 + signum)
+    signal.signal(signal.SIGTERM, stop)
     settings = Settings.load()
     database = Database(settings.database_path)
     database.initialize()

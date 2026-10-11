@@ -3,9 +3,13 @@
 import json
 import logging
 import re
+from time import perf_counter
 from typing import Any, Callable, Dict, List, Optional
 
+from cryptography.fernet import InvalidToken
+
 from db.governance_config import GovernanceConfigRepository
+from utils.time import utc_now
 
 
 
@@ -16,7 +20,7 @@ ANOMALY_RULE_NAMES = [
     "日期有效性", "元数据结构", "正文长度", "来源格式", "修订引用完整性",
     "重复组主记录", "必填字段非空", "字段白名单",
 ]
-RISK_CATEGORIES = ["个人信息暴露", "误导信息", "仇恨歧视", "违法有害"]
+RISK_CATEGORIES = ["个人信息暴露", "误导信息"]
 RISK_LEVELS = [
     {"level": "HIGH", "label": "高风险", "color": "#f34d69", "definition": "有直接严重伤害或敏感个人信息暴露证据"},
     {"level": "MEDIUM", "label": "中风险", "color": "#f5a623", "definition": "存在可关联个人信息或明确的潜在伤害"},
@@ -38,6 +42,15 @@ def _connect_mysql(**kwargs):
     import pymysql
 
     return pymysql.connect(cursorclass=pymysql.cursors.DictCursor, **kwargs)
+
+
+class BusinessDatabaseTestError(Exception):
+    """管理员连接检测的安全错误，不向调用方暴露驱动或凭据原文。"""
+
+    def __init__(self, code: str, message: str, status_code: int = 502):
+        super().__init__(message)
+        self.code = code
+        self.status_code = status_code
 
 
 class BusinessGovernanceData:
@@ -67,6 +80,46 @@ class BusinessGovernanceData:
             )
         except Exception as exc:
             raise RuntimeError("业务数据库连接失败") from exc
+
+    def test_connection(self) -> Dict[str, Any]:
+        """只读检查已保存配置及治理字段，不读取业务正文或使用模拟样本。"""
+        started = perf_counter()
+        try:
+            connection = self._connect()
+        except RuntimeError as exc:
+            if str(exc) == "业务数据库连接未配置":
+                raise BusinessDatabaseTestError("business_database_not_configured",
+                                                "请先保存业务数据库配置", 409) from exc
+            cause = exc.__cause__
+            if isinstance(cause, InvalidToken):
+                raise BusinessDatabaseTestError("business_database_credentials_invalid",
+                                                "已保存的数据库密码无法解密，请检查 credential_key 或重新保存配置", 500) from exc
+            code = cause.args[0] if cause is not None and cause.args else None
+            messages = {1045: "数据库账号或密码错误，或该账号不允许从本服务主机访问",
+                        1049: "配置的数据库不存在，请检查库名",
+                        2003: "无法连接 MySQL，请检查主机、端口及数据库服务状态",
+                        2013: "MySQL 连接中断或响应超时"}
+            message = messages.get(code, "业务数据库连接失败，请检查连接配置、网络及数据库服务")
+            raise BusinessDatabaseTestError("business_database_connection_failed", message) from exc
+        checks = ["connection"]
+        name = "query"
+        try:
+            with connection.cursor() as cursor:
+                for name, sql in (
+                    ("query", "SELECT 1"),
+                    ("datasets", "SELECT id, name, version FROM datasets LIMIT 0"),
+                    ("dataset_records", "SELECT id, dataset_id, payload FROM dataset_records LIMIT 0"),
+                ):
+                    cursor.execute(sql)
+                    checks.append(name)
+        except Exception as exc:
+            raise BusinessDatabaseTestError("business_database_query_failed",
+                "MySQL 已连通，但 {} 检查失败，请检查表结构及 SELECT 权限".format(name)) from exc
+        finally:
+            connection.close()
+        return {"connected": True, "checks": checks,
+                "elapsed_ms": round((perf_counter() - started) * 1000),
+                "checked_at": utc_now().isoformat()}
 
     def policy(self, kind: str, scheme_id: str) -> Dict[str, Any]:
         """按任务类型和方案版本返回固定评分标准或规则。"""

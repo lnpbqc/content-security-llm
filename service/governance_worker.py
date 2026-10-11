@@ -10,6 +10,7 @@ from db.governance_config import GovernanceConfigRepository
 from llm.models import ModelManager
 from service.governance import GovernanceService
 from service.governance_data import BusinessGovernanceData
+from utils.locking import exclusive_lock
 
 
 def main() -> None:
@@ -22,19 +23,21 @@ def main() -> None:
     database = Database(settings.database_path)
     database.initialize()
     repository = GovernanceRepository(database)
-    repository.recover_running()
     config = GovernanceConfigRepository(database)
     manager = ModelManager(database, settings.credential_key)
     service = GovernanceService(
         repository, BusinessGovernanceData(config, manager.cipher,
                                            mock_samples=settings.governance_mock_samples), manager, config,
     )
-    while True:
-        worked = service.run_once()
-        if args.once:
-            return
-        if not worked:
-            time.sleep(1)
+    with exclusive_lock(database.path.parent / "governance-worker" / "worker.lock",
+                        "治理 worker 已运行，只允许单实例"):
+        repository.recover_running()
+        while True:
+            worked = service.run_once()
+            if args.once:
+                return
+            if not worked:
+                time.sleep(1)
 
 
 if __name__ == "__main__":

@@ -2,13 +2,16 @@
 
 import json
 import sqlite3
+import sys
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import httpx
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
+from openai import OpenAI
 from pydantic import ValidationError
 
 from config import Settings
@@ -28,6 +31,12 @@ class FakeCompletionClient:
     def __init__(self, **kwargs):
         """提供与 OpenAI 客户端一致的最小调用入口。"""
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self.create))
+
+    def with_options(self, **kwargs):
+        return self
+
+    def close(self):
+        pass
 
     def create(self, **kwargs):
         """根据任务输入生成确定的逐条模型响应。"""
@@ -313,6 +322,138 @@ def create(client, kind, scheme, dataset_id=3):
     return response.json()["data"]
 
 
+def test_governance_worker_locks_before_recovering_tasks(app_client, monkeypatch):
+    from service import governance_worker
+    from service.training_worker import worker_lock
+
+    app, client, _, _ = app_client
+    service = app.state.governance_service
+    task = create(client, "governance-value", "general-v1")
+    service.repository.claim()
+    monkeypatch.setattr(governance_worker.Settings, "load", lambda: app.state.test_settings)
+    monkeypatch.setattr(governance_worker, "GovernanceService", lambda *args: SimpleNamespace(run_once=lambda: False))
+    monkeypatch.setattr(sys, "argv", ["governance_worker", "--once"])
+    directory = app.state.database.path.parent / "governance-worker"
+    with worker_lock(directory):
+        with pytest.raises(RuntimeError, match="治理 worker.*单实例"):
+            governance_worker.main()
+        assert service.repository.get_task(task["task_id"])["status"] == "running"
+        with worker_lock(app.state.training_service.repository.root):
+            pass
+    governance_worker.main()
+    assert service.repository.get_task(task["task_id"])["status"] == "pending"
+
+
+@pytest.mark.parametrize("failure,error_code", [(500, "provider_error"), ("timeout", "provider_timeout")])
+def test_governance_limits_provider_wait_and_continues_after_error(app_client, monkeypatch, failure, error_code):
+    app, client, _, _ = app_client
+    requests, options = [], []
+
+    def handler(request):
+        requests.append(request)
+        if len(requests) == 1:
+            if failure == "timeout":
+                raise httpx.ReadTimeout("synthetic timeout", request=request)
+            return httpx.Response(failure, json={"error": {"message": "synthetic failure"}})
+        completion = FakeCompletionClient().create(**json.loads(request.content))
+        return httpx.Response(200, json={"id": "test", "object": "chat.completion", "created": 1,
+            "model": "test", "choices": [{"index": 0, "finish_reason": "stop", "message": {
+                "role": "assistant", "content": completion.choices[0].message.content}}]})
+
+    class ObservedOpenAI(OpenAI):
+        def with_options(self, **kwargs):
+            options.append(kwargs)
+            return super().with_options(**kwargs)
+
+    monkeypatch.setattr(app.state.model_manager, "client_factory", lambda **kwargs: ObservedOpenAI(
+        **kwargs, max_retries=2, http_client=httpx.Client(transport=httpx.MockTransport(handler))))
+    service = app.state.governance_service
+    task = create(client, "governance-value", "general-v1")
+    next_task = create(client, "governance-value", "general-v1")
+    assert service.run_once() and service.run_once()
+    assert options == [{"timeout": 120, "max_retries": 0}] * 6
+    assert len(requests) == 6
+    outcomes = service.repository.sample_outcomes(task["task_id"])
+    assert outcomes["1"]["error_code"] == error_code
+    assert outcomes["2"]["status"] == outcomes["3"]["status"] == "success"
+    assert service.repository.get_task(next_task["task_id"])["status"] == "succeeded"
+
+
+@pytest.mark.parametrize("case", ["empty", "blank", "fabricated", "valid", "unavailable"])
+def test_value_scoring_requires_real_nonblank_evidence(app_client, monkeypatch, case):
+    app, client, _, _ = app_client
+    original = FakeCompletionClient.create
+
+    def completion(self, **kwargs):
+        result = original(self, **kwargs)
+        output = json.loads(result.choices[0].message.content)
+        if case == "unavailable":
+            output.update(status="unavailable", dimensions=[], unavailable_reason="证据不足")
+        else:
+            text = json.loads(kwargs["messages"][-1]["content"])["text"]
+            evidence = {"empty": [], "blank": [" "], "fabricated": ["不存在的引用正文"],
+                        "valid": [text.splitlines()[0] + "\n"]}[case]
+            for dimension in output["dimensions"]:
+                dimension["evidence"] = evidence
+        result.choices[0].message.content = json.dumps(output, ensure_ascii=False)
+        return result
+
+    monkeypatch.setattr(FakeCompletionClient, "create", completion)
+    task = create(client, "governance-value", "general-v1")
+    service = app.state.governance_service
+    assert service.run_once()
+    saved = service.repository.get_task(task["task_id"])
+    if case in ("empty", "blank", "fabricated"):
+        assert saved["status"] == "failed" and saved["result_id"] is None
+        assert all(row["error_code"] == "invalid_structured_output"
+                   for row in service.repository.sample_outcomes(task["task_id"]).values())
+    else:
+        assert saved["status"] == "succeeded"
+        result = service.repository.get_result(saved["result_id"], saved["token_hash"], saved["kind"])
+        assert result["summary"]["valid_count"] == (3 if case == "valid" else 0)
+        if case == "valid":
+            assert result["samples"][0]["dimensions"][0]["evidence"][0].endswith("\n")
+        else:
+            assert result["summary"]["unavailable_count"] == 3
+
+
+@pytest.mark.parametrize("field", ["version_id", "language", "scheme_id"])
+@pytest.mark.parametrize("scheme,name", [
+    ("general-v1", "value"),
+    ("anomaly-basic-v1", "anomaly"),
+    ("risk-v1", "risk"),
+])
+def test_governance_empty_query_scope_is_422(app_client, field, scheme, name):
+    app, _, _, business = app_client
+    params = scope(scheme)
+    params[field] = ""
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.get("/api/v1/data-governance/" + name + "-results/latest",
+                              headers=headers(), params=params)
+    assert response.status_code == 422
+    assert response.json()["error_code"] == "validation_error"
+    assert response.json()["data"] is None
+    assert business.connections == 0 and FakeCompletionClient.calls == []
+
+
+def test_risk_options_only_advertise_categories_with_valid_rules(app_client):
+    app, client, _, _ = app_client
+    service = app.state.governance_service
+    policy = service.data.policy("governance-risk", "risk-v1")
+    options = client.get("/api/v1/data-governance/risk-options", headers=headers()).json()["data"]
+    assert options["categories"] == policy["categories"]
+    assert set(policy["categories"]) == {rule["category"] for rule in policy["rules"]}
+    sample = service.data.samples(scope("risk-v1"))[0]
+    for rule in policy["rules"]:
+        output = {"sampleId": sample["id"], "sampleRevisionId": sample["revision_id"], "findings": [{
+            "category": rule["category"], "suggestedLevel": "NOTICE", "reason": "需核验",
+            "ruleId": rule["id"], "ruleVersion": rule["version"], "evidenceRefs": [sample["id"] + ":e1"]}]}
+        service._validate("governance-risk", sample, policy, output)
+        output["findings"][0]["ruleId"] = "missing"
+        with pytest.raises(ValueError, match="风险证据"):
+            service._validate("governance-risk", sample, policy, output)
+
+
 def test_three_tasks_publish_read_only_results_and_preserve_invoke(app_client):
     """验证三类任务结果、只读查询、令牌隔离及旧统一入口。"""
     app, client, model_id, business = app_client
@@ -426,6 +567,69 @@ def test_restart_resumes_saved_sample_and_rejects_invalid_scope(app_client):
                                 "input": scope("missing")})
     assert invalid.status_code == 422
     assert invalid.json()["code"] == 422
+
+
+@pytest.mark.parametrize("mock_samples", [False, True])
+@pytest.mark.parametrize("sort_by", ["score", "tier"])
+@pytest.mark.parametrize("sort_order", ["asc", "desc"])
+def test_value_sorting_supports_real_and_mock_ids(app_client, mock_samples, sort_by, sort_order):
+    """同分样本按 ID 自然排序，模拟 ID 不导致 500，分页顺序保持稳定。"""
+    app, client, _, business = app_client
+    service = app.state.governance_service
+    service.data.mock_samples = mock_samples
+    if mock_samples:
+        business.records[3] = []
+        expected = ["mock-3-v1.0.0-{}".format(index) for index in range(1, 11)]
+    else:
+        business.records[3] = [{"id": index, "payload": {"text": "原文证据", "language": "zh"}}
+                               for index in (10, 2, 1)]
+        expected = ["1", "2", "10"]
+    task = create(client, "governance-value", "general-v1")
+    assert service.run_once()
+    saved = service.repository.get_task(task["task_id"])
+    assert saved["status"] == "succeeded"
+    calls, reads = len(FakeCompletionClient.calls), business.connections
+    ids = []
+    with TestClient(app, raise_server_exceptions=False) as query_client:
+        for page in range(1, (len(expected) + 1) // 2 + 1):
+            response = query_client.get(
+                "/api/v1/data-governance/value-results/" + saved["result_id"] + "/samples",
+                headers=headers(), params={"sort_by": sort_by, "sort_order": sort_order,
+                                           "page": page, "page_size": 2},
+            )
+            assert response.status_code == 200, response.text
+            ids.extend(row["id"] for row in response.json()["data"]["items"])
+    assert ids == expected
+    assert len(FakeCompletionClient.calls) == calls and business.connections == reads
+
+
+@pytest.mark.parametrize("quote", [" ", "\n", "不存在的原文", "文化传承"])
+def test_anomaly_requires_nonblank_original_quote(app_client, monkeypatch, quote):
+    """空白和伪造引用拒绝发布为异常证据，其他样本仍正常处理。"""
+    app, client, _, _ = app_client
+    original = FakeCompletionClient.create
+
+    def completion(self, **kwargs):
+        response = original(self, **kwargs)
+        output = json.loads(response.choices[0].message.content)
+        for finding in output["findings"]:
+            finding["quote"] = quote
+        response.choices[0].message.content = json.dumps(output, ensure_ascii=False)
+        return response
+
+    monkeypatch.setattr(FakeCompletionClient, "create", completion)
+    task = create(client, "governance-anomaly", "anomaly-basic-v1")
+    service = app.state.governance_service
+    assert service.run_once()
+    saved = service.repository.get_task(task["task_id"])
+    assert saved["status"] == "succeeded"
+    result = service.repository.get_result(saved["result_id"], saved["token_hash"], saved["kind"])
+    valid = quote == "文化传承"
+    assert result["summary"]["failed_count"] == (0 if valid else 1)
+    assert result["summary"]["anomaly_count"] == (1 if valid else 0)
+    outcomes = service.repository.sample_outcomes(task["task_id"])
+    assert outcomes["1"]["status"] == outcomes["2"]["status"] == "success"
+    assert outcomes["3"]["error_code"] == (None if valid else "invalid_structured_output")
 
 
 def test_missing_model_configuration_rejects_creation(app_client):
@@ -760,6 +964,103 @@ def test_value_samples_add_scope_without_changing_saved_history(app_client):
     assert len(latest) == 1 and "变更后的正文" in latest[0]["text"]
     assert service.repository.get_result(result_id, task["token_hash"], "governance-value") == stored
     assert len(FakeCompletionClient.calls) == calls and business.connections == connections
+
+
+@pytest.mark.parametrize("credentials", [{}, headers(), {"X-Setup-Secret": "wrong"}])
+def test_business_database_test_requires_admin_before_connection(app_client, credentials):
+    app, client, _, business = app_client
+    response = client.post("/api/v1/admin/governance/business-database/test", headers=credentials)
+    assert response.status_code == 403
+    assert response.json()["error_code"] == "invalid_setup_secret"
+    assert business.connections == 0 and business.queries == []
+
+
+def test_business_database_test_without_saved_configuration(app_client):
+    app, client, _, business = app_client
+    with app.state.database.connect() as connection:
+        connection.execute("DELETE FROM business_database_config")
+    response = client.post("/api/v1/admin/governance/business-database/test",
+                           headers={"X-Setup-Secret": "s" * 32})
+    assert response.status_code == 409
+    assert response.json()["error_code"] == "business_database_not_configured"
+    assert business.connections == 0 and FakeCompletionClient.calls == []
+
+
+@pytest.mark.parametrize("failure", [None, "cursor", "SELECT 1", "datasets", "dataset_records"])
+def test_business_database_test_is_read_only_and_closes_connection(app_client, failure):
+    from contextlib import contextmanager
+
+    app, client, _, _ = app_client
+    queries, connections, closed = [], [], []
+    saved = app.state.governance_config.get_business_database()
+
+    def execute(sql):
+        queries.append(sql)
+        if failure and (sql == failure or "FROM " + failure + " " in sql):
+            raise OSError(1142, "private-password-secret private-driver-details")
+
+    @contextmanager
+    def cursor():
+        if failure == "cursor":
+            raise OSError(1142, "private-password-secret private-driver-details")
+        yield SimpleNamespace(execute=execute)
+
+    def connect(**kwargs):
+        connections.append(kwargs)
+        return SimpleNamespace(cursor=cursor, close=lambda: closed.append(True))
+
+    app.state.governance_service.data.connection_factory = connect
+    response = client.post("/api/v1/admin/governance/business-database/test",
+                           headers={"X-Setup-Secret": "s" * 32, "X-Trace-Id": "mysql-test"})
+    body = response.json()
+    assert body["trace_id"] == "mysql-test" and body["timestamp"]
+    if failure is None:
+        assert response.status_code == 200 and body["code"] == 0
+        assert body["data"]["connected"] is True
+        assert body["data"]["checks"] == ["connection", "query", "datasets", "dataset_records"]
+        assert body["data"]["elapsed_ms"] >= 0 and body["data"]["checked_at"]
+        assert queries == ["SELECT 1", "SELECT id, name, version FROM datasets LIMIT 0",
+                           "SELECT id, dataset_id, payload FROM dataset_records LIMIT 0"]
+    else:
+        assert response.status_code == 502
+        assert body["error_code"] == "business_database_query_failed" and body["data"] is None
+    assert len(connections) == 1 and connections[0]["password"] == "secret"
+    assert connections[0]["database"] == "content_safety" and connections[0]["user"] == "reader"
+    assert connections[0]["connect_timeout"] == 10 and connections[0]["read_timeout"] == 30
+    assert closed == [True]
+    assert "secret" not in response.text and "private-driver-details" not in response.text
+    assert app.state.governance_config.get_business_database() == saved
+    assert FakeCompletionClient.calls == []
+
+
+@pytest.mark.parametrize("mysql_code,expected", [(1045, "账号或密码"), (1049, "数据库不存在"),
+                                                 (2003, "主机、端口"), (2013, "连接中断"),
+                                                 (0, "连接失败")])
+def test_business_database_test_connection_errors_hide_private_details(app_client, mysql_code, expected):
+    app, client, _, _ = app_client
+
+    def connect(**kwargs):
+        raise OSError(mysql_code, "private-password-secret private-driver-details")
+
+    app.state.governance_service.data.connection_factory = connect
+    response = client.post("/api/v1/admin/governance/business-database/test",
+                           headers={"X-Setup-Secret": "s" * 32})
+    assert response.status_code == 502
+    assert response.json()["error_code"] == "business_database_connection_failed"
+    assert expected in response.json()["message"]
+    assert "secret" not in response.text and "private-driver-details" not in response.text
+    assert FakeCompletionClient.calls == []
+
+
+def test_business_database_test_invalid_encrypted_password_never_connects(app_client):
+    app, client, _, business = app_client
+    with app.state.database.connect() as connection:
+        connection.execute("UPDATE business_database_config SET encrypted_password='invalid'")
+    response = client.post("/api/v1/admin/governance/business-database/test",
+                           headers={"X-Setup-Secret": "s" * 32})
+    assert response.status_code == 500
+    assert response.json()["error_code"] == "business_database_credentials_invalid"
+    assert business.connections == 0 and FakeCompletionClient.calls == []
 
 
 def test_model_overviews_count_latest_snapshot_once_and_isolate_tokens(app_client):

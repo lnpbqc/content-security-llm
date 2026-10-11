@@ -1,5 +1,6 @@
 """提供三类治理任务的创建、轮询和只读结果接口。"""
 
+import re
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
@@ -51,8 +52,8 @@ def get_service(request: Request) -> GovernanceService:
     return request.app.state.governance_service
 
 
-def query_scope(dataset_id: int = Query(..., ge=1), version_id: str = Query(...),
-                language: str = Query(...), scheme_id: str = Query(...)) -> Dict[str, Any]:
+def query_scope(dataset_id: int = Query(..., ge=1), version_id: str = Query(..., min_length=1),
+                language: str = Query(..., min_length=1), scheme_id: str = Query(..., min_length=1)) -> Dict[str, Any]:
     """将四个 URL 查询参数整理成统一的任务范围。"""
     return Scope(dataset_id=dataset_id, version_id=version_id,
                  language=language, scheme_id=scheme_id).model_dump()
@@ -243,7 +244,8 @@ def value_samples(request: Request, result_id: str, page: int = Query(1, ge=1),
         if sort_by not in {"score", "tier"} or sort_order not in {"asc", "desc"}:
             raise HTTPException(422, detail={"code": "invalid_sort", "message": "评分排序条件无效"})
         ranks = {"low": 0, "medium": 1, "high": 2}
-        rows.sort(key=lambda row: int(row["id"].rsplit("_", 1)[-1]))
+        rows.sort(key=lambda row: [int(part) if part.isdecimal() else part
+                                   for part in re.split(r"(\d+)", row["id"])])
         rows.sort(key=lambda row: (row["score"] if row["score"] is not None else 0)
                   if sort_by == "score" else ranks.get(row["tier"], -1),
                   reverse=sort_order == "desc")

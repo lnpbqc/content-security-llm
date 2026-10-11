@@ -42,6 +42,37 @@ class Database:
                 CREATE INDEX IF NOT EXISTS ix_call_records_token_created_at
                     ON call_records(token_hash, created_at DESC);
 
+                CREATE TABLE IF NOT EXISTS analysis_records (
+                    id TEXT PRIMARY KEY,
+                    token_hash TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    scenario_code TEXT,
+                    model_id TEXT NOT NULL REFERENCES models(id),
+                    input_json TEXT NOT NULL,
+                    state_json TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN ('running', 'succeeded', 'failed')),
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS ix_analysis_records_token_created
+                    ON analysis_records(token_hash, created_at DESC);
+
+                CREATE TABLE IF NOT EXISTS neural_trace_tasks (
+                    id TEXT PRIMARY KEY,
+                    token_hash TEXT NOT NULL,
+                    case_id TEXT NOT NULL,
+                    input_json TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN ('pending', 'running', 'succeeded', 'failed')),
+                    stage TEXT NOT NULL,
+                    result_json TEXT,
+                    error_message TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    started_at TEXT,
+                    finished_at TEXT
+                );
+                CREATE INDEX IF NOT EXISTS ix_neural_trace_tasks_token_created
+                    ON neural_trace_tasks(token_hash, created_at DESC);
+
                 CREATE TABLE IF NOT EXISTS governance_tasks (
                     id TEXT PRIMARY KEY,
                     kind TEXT NOT NULL,
@@ -139,6 +170,15 @@ class Database:
                     created_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS ix_training_metrics_task_id ON training_metrics(task_id, id);
+                CREATE TABLE IF NOT EXISTS training_script_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id TEXT NOT NULL REFERENCES training_tasks(id),
+                    type TEXT NOT NULL CHECK(type IN ('metric', 'progress', 'artifact')),
+                    event_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS ix_training_script_events_task_id
+                    ON training_script_events(task_id, id);
                 CREATE TABLE IF NOT EXISTS training_artifacts (
                     id TEXT PRIMARY KEY,
                     task_id TEXT NOT NULL REFERENCES training_tasks(id),

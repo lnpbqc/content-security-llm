@@ -137,6 +137,8 @@ class TrainingRepository:
             )
 
     def metrics(self, task_id: str, after_id: int = 0, limit: int = 200) -> dict:
+        if self.get(task_id)["config"].get("runner") == "script":
+            return self.script_events(task_id, after_id, limit, "metric")
         with self.database.connect() as connection:
             rows = connection.execute(
                 "SELECT * FROM training_metrics WHERE task_id = ? AND id > ? ORDER BY id LIMIT ?",
@@ -150,9 +152,58 @@ class TrainingRepository:
         return {"items": items, "next_after_id": items[-1]["id"] if items else after_id,
                 "has_more": len(rows) > limit}
 
+    def record_script_event(self, task_id: str, event: dict):
+        now = utc_now().isoformat()
+        with self.database.connect() as connection:
+            connection.execute(
+                "INSERT INTO training_script_events (task_id, type, event_json, created_at) VALUES (?, ?, ?, ?)",
+                (task_id, event["type"], encode(event), now),
+            )
+            connection.execute("UPDATE training_tasks SET updated_at = ? WHERE id = ?", (now, task_id))
+            if event["type"] == "metric":
+                connection.execute("UPDATE training_tasks SET latest_metrics_json = ? WHERE id = ?",
+                                   (encode(event["metrics"]), task_id))
+
+    def script_events(self, task_id: str, after_id: int = 0, limit: int = 200, event_type=None):
+        with self.database.connect() as connection:
+            query = "SELECT * FROM training_script_events WHERE task_id = ? AND id > ?"
+            args = [task_id, after_id]
+            if event_type is not None:
+                query += " AND type = ?"
+                args.append(event_type)
+            rows = connection.execute(query + " ORDER BY id LIMIT ?", (*args, limit + 1)).fetchall()
+        items = [{**json.loads(row["event_json"]), "id": row["id"], "task_id": task_id,
+                  "created_at": row["created_at"]} for row in rows[:limit]]
+        return {"items": items, "next_after_id": items[-1]["id"] if items else after_id,
+                "has_more": len(rows) > limit}
+
+    def public_script(self, task):
+        config = {key: value for key, value in task["config"].items() if key != "python_source"}
+        with self.database.connect() as connection:
+            latest = {}
+            for event_type in ("metric", "progress"):
+                row = connection.execute(
+                    "SELECT event_json FROM training_script_events WHERE task_id = ? AND type = ? ORDER BY id DESC LIMIT 1",
+                    (task["id"], event_type),
+                ).fetchone()
+                latest[event_type] = json.loads(row["event_json"]) if row else {}
+        started = datetime.fromisoformat(task["started_at"]) if task["started_at"] else None
+        ended = datetime.fromisoformat(task["finished_at"]) if task["finished_at"] else utc_now()
+        return {**config, "id": task["id"], "config": config, "status": task["status"],
+                **{key: task[key] for key in ("created_at", "updated_at", "started_at", "finished_at",
+                                             "source_hash", "runtime", "error_message")},
+                "elapsed_seconds": max(0, int((ended - started).total_seconds())) if started else 0,
+                "epoch": latest["metric"].get("epoch"), "step": latest["metric"].get("step"),
+                "latest_phase": latest["metric"].get("phase"),
+                "latest_metrics": latest["metric"].get("metrics", {}),
+                "progress": latest["progress"].get("progress")}
+
     def artifact(self, task_id: str, filename: str, kind: str, epoch: int | None = None,
                  loss: float | None = None):
-        path = self.directory(task_id) / filename
+        root = self.directory(task_id).resolve()
+        path = (root / filename).resolve()
+        if not path.is_relative_to(root) or not path.is_file():
+            raise ValueError("产物必须为任务目录内的文件")
         digest = sha256()
         with path.open("rb") as stream:
             for chunk in iter(lambda: stream.read(1024 * 1024), b""):
@@ -173,6 +224,8 @@ class TrainingRepository:
             )]
 
     def public(self, task: dict) -> dict:
+        if task["config"].get("runner") == "script":
+            return self.public_script(task)
         config = {key: value for key, value in task["config"].items() if key != "python_source"}
         with self.database.connect() as connection:
             history = connection.execute(

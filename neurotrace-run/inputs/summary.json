@@ -1,0 +1,58 @@
+{
+  "schema_version": "neural-trace-input-summary-v1",
+  "created_at": "2026-08-11T22:40:40.087699+08:00",
+  "case_count": 5,
+  "all_alignments_valid": true,
+  "cases": [
+    {
+      "case_id": "CASE_HIS_028_V01",
+      "clean_token_count": 110,
+      "poison_token_count": 110,
+      "positionwise_difference_count": 3,
+      "common_prefix_token_count": 73,
+      "common_suffix_token_count": 34,
+      "last_prompt_token_index": 109,
+      "alignment_valid": true
+    },
+    {
+      "case_id": "CASE_HIS_041_V02",
+      "clean_token_count": 106,
+      "poison_token_count": 106,
+      "positionwise_difference_count": 2,
+      "common_prefix_token_count": 79,
+      "common_suffix_token_count": 23,
+      "last_prompt_token_index": 105,
+      "alignment_valid": true
+    },
+    {
+      "case_id": "CASE_MAR_031_V01",
+      "clean_token_count": 147,
+      "poison_token_count": 147,
+      "positionwise_difference_count": 1,
+      "common_prefix_token_count": 88,
+      "common_suffix_token_count": 58,
+      "last_prompt_token_index": 146,
+      "alignment_valid": true
+    },
+    {
+      "case_id": "CASE_MAR_059_V01",
+      "clean_token_count": 142,
+      "poison_token_count": 142,
+      "positionwise_difference_count": 2,
+      "common_prefix_token_count": 89,
+      "common_suffix_token_count": 45,
+      "last_prompt_token_index": 141,
+      "alignment_valid": true
+    },
+    {
+      "case_id": "CASE_NAT_030_V02",
+      "clean_token_count": 113,
+      "poison_token_count": 113,
+      "positionwise_difference_count": 1,
+      "common_prefix_token_count": 78,
+      "common_suffix_token_count": 34,
+      "last_prompt_token_index": 112,
+      "alignment_valid": true
+    }
+  ]
+}

@@ -2,15 +2,16 @@
 
 from typing import Literal, Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from llm.models import ModelNotFoundError
 from router.governance import success
 from schemas.auth import AdminTokenPublic, TokenStatusUpdate
 from schemas.calls import CallPublic
-from service.auth import InvalidSetupSecretError
+from router.dependencies import require_admin
 from service.business_users import BusinessUsersTimeoutError, BusinessUsersUnavailableError
+from service.governance_data import BusinessDatabaseTestError
 
 
 router = APIRouter(prefix="/api/v1/admin", tags=["governance-admin"])
@@ -40,14 +41,6 @@ class TokenLabelInput(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     label: str = Field(min_length=1, max_length=100)
-
-
-def require_admin(request: Request, x_setup_secret: Optional[str] = Header(default=None)) -> None:
-    """复用现有初始化密钥校验管理员身份。"""
-    try:
-        request.app.state.auth_service._require_setup_secret(x_setup_secret)
-    except InvalidSetupSecretError as exc:
-        raise HTTPException(403, detail={"code": "invalid_setup_secret"}) from exc
 
 
 @router.get("/business-users", dependencies=[Depends(require_admin)])
@@ -102,6 +95,16 @@ def set_business_database(request: Request, payload: BusinessDatabaseInput):
         encrypted_password=cipher.encrypt(payload.password.encode("utf-8")).decode("ascii"),
     )
     return get_business_database(request)
+
+
+@router.post("/governance/business-database/test", dependencies=[Depends(require_admin)])
+def test_business_database(request: Request):
+    """真实检查已保存的业务 MySQL 连接和治理读取条件，不更改配置。"""
+    try:
+        result = request.app.state.governance_service.data.test_connection()
+    except BusinessDatabaseTestError as exc:
+        raise HTTPException(exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
+    return success(request, result)
 
 
 @router.get("/tokens", dependencies=[Depends(require_admin)])

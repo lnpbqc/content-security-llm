@@ -9,14 +9,14 @@ from schemas.models import ModelCreate, ModelPublic, ModelUpdate
 from service.models import NullModelFieldError, create_model as create_model_record
 from service.models import update_model as update_model_record
 
-from .dependencies import get_model_manager, require_token
+from .dependencies import get_model_manager, require_admin, require_token
 from .errors import model_not_found
 
 
 router = APIRouter(prefix="/models", tags=["models"], dependencies=[Depends(require_token)])
 
 
-@router.post("", response_model=ModelPublic, status_code=201)
+@router.post("", response_model=ModelPublic, status_code=201, dependencies=[Depends(require_admin)])
 def create_model(payload: ModelCreate, manager: ModelManager = Depends(get_model_manager)) -> ModelPublic:
     return ModelPublic.from_record(create_model_record(manager, payload.model_dump()))
 
@@ -34,7 +34,7 @@ def get_model(model_id: str, manager: ModelManager = Depends(get_model_manager))
         raise model_not_found(exc) from exc
 
 
-@router.patch("/{model_id}", response_model=ModelPublic)
+@router.patch("/{model_id}", response_model=ModelPublic, dependencies=[Depends(require_admin)])
 def update_model(model_id: str, payload: ModelUpdate,
                  manager: ModelManager = Depends(get_model_manager)) -> ModelPublic:
     try:
@@ -46,7 +46,7 @@ def update_model(model_id: str, payload: ModelUpdate,
     return ModelPublic.from_record(record)
 
 
-@router.delete("/{model_id}", status_code=204)
+@router.delete("/{model_id}", status_code=204, dependencies=[Depends(require_admin)])
 def delete_model(model_id: str, manager: ModelManager = Depends(get_model_manager)) -> None:
     try:
         manager.delete_model(model_id)
