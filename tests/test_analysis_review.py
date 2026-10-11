@@ -27,7 +27,7 @@ def test_startup_finishes_interrupted_analysis_and_preserves_history(api):
         repository.save(record_id, token_hash, {**state, "status": status, "finished_at": "2026-10-10T00:00:00+00:00"})
         finished.append(repository.get(record_id, token_hash))
     # 用同一测试库模拟单 API 实例重启，不能连接真实业务库或重放模型请求。
-    settings = Settings(client.app.state.database.path, "s" * 32, Fernet.generate_key())
+    settings = Settings(client.app.state.database.data_dir, "s" * 32, Fernet.generate_key())
 
     def reject_provider(**kwargs):
         raise AssertionError("启动恢复不能重放模型请求")

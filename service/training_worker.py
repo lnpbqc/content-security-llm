@@ -151,7 +151,7 @@ def main():
         raise SystemExit(128 + signum)
     signal.signal(signal.SIGTERM, stop)
     settings = Settings.load()
-    database = Database(settings.database_path)
+    database = Database(settings)
     database.initialize()
     repository = TrainingRepository(database)
     config = GovernanceConfigRepository(database)

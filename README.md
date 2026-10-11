@@ -1,6 +1,6 @@
 # Content Security LLM
 
-基于 FastAPI 的内容安全与模型服务，提供模型调用、内容分析、数据治理、训练任务和神经因果溯源。使用 SQLite 保存配置、调用记录及任务状态，通过 OpenAI 兼容接口调用上游模型。
+基于 FastAPI 的内容安全与模型服务，提供模型调用、内容分析、数据治理、训练任务和神经因果溯源。使用 MySQL 的 `llm_` 表保存配置、调用记录及任务状态，通过 OpenAI 兼容接口调用上游模型。
 
 ## 主要功能
 
@@ -28,7 +28,10 @@ uv sync --python 3.11
 | --- | --- |
 | `setup_secret` | 至少 32 个字符的随机管理员密钥。 |
 | `credential_key` | Fernet 加密密钥，用于保存模型 API Key 和业务库密码；重启、迁移时保持不变。 |
-| `database_path` | SQLite 路径，默认 `db/app.sqlite3`，相对配置文件所在目录解析。 |
+| `data_dir` | 本地任务文件目录，默认 `db`，相对配置文件所在目录解析。 |
+| `mysql_host` / `mysql_port` | 主存储 MySQL 地址和端口，默认 `127.0.0.1:3306`。 |
+| `mysql_user` / `mysql_password` | MySQL 账号和密码；密码必须配置。 |
+| `mysql_database` | MySQL 库名，默认 `content_safety`；本项目只使用 `llm_` 表。 |
 | `business_api_base_url` | 业务 HTTP 接口根地址，默认 `http://127.0.0.1:8000/api/v1`。 |
 | `governance_mock_samples` | 治理任务的空记录模拟开关，默认 `false`。 |
 
@@ -39,13 +42,27 @@ uv run python -c "import secrets; print(secrets.token_urlsafe(32))"
 uv run python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
-启动开发服务：
+首次启动前先执行下节的建表命令，再启动开发服务：
 
 ```shell
 uv run fastapi dev main.py --host 127.0.0.1 --port 8001
 ```
 
-默认读取项目根目录的 `settings.local.json`。可用 `APP_CONFIG_FILE` 指定配置文件；`APP_SETUP_SECRET`、`MODEL_CREDENTIAL_KEY`、`APP_DB_PATH` 可分别覆盖对应字段。私有配置已加入 Git 忽略规则。
+默认读取项目根目录的 `settings.local.json`。可用 `APP_CONFIG_FILE` 指定配置文件；`APP_SETUP_SECRET`、`MODEL_CREDENTIAL_KEY`、`APP_DATA_DIR` 可覆盖对应字段；`MYSQL_HOST`、`MYSQL_PORT`、`MYSQL_USER`、`MYSQL_PASSWORD`、`MYSQL_DATABASE` 优先于 JSON 中对应的 `mysql_*` 配置。旧 `database_path` / `APP_DB_PATH` 仅在未配置 `data_dir` / `APP_DATA_DIR` 时用于推导历史任务目录，不再读写 SQLite。私有配置已加入 Git 忽略规则。
+
+## 初始化 MySQL 表
+
+当前按全新开发库使用，不需要导入旧数据。先准备好 `content_safety` 数据库及连接账号，在项目根目录执行：
+
+```shell
+uv run python -m scripts.init_mysql
+```
+
+建表 SQL 位于 [db/mysql_schema.sql](db/mysql_schema.sql)，也可通过 MySQL 客户端在目标库中执行该文件。脚本复用这份 SQL，按依赖顺序创建 14 张 `llm_` 表并检查结构；使用 MySQL 8.4、InnoDB 和 utf8mb4，包含主键、唯一约束、外键、状态约束及任务查询索引。重复执行不会清空已有数据；已有不兼容的表会报错，不自动改表。
+
+建表完成后启动 API 和所需 worker。API 和 worker 启动只检查结构，不自动建表。建表账号需有 CREATE 权限，运行账号需有 SELECT/INSERT/UPDATE/DELETE 权限。本项目使用 `llm_` 前缀，与业务后端已有的无前缀表分开。
+
+本机 Docker MySQL 地址为 `127.0.0.1:13306`，服务器按实际地址配置（常见端口 3306）。治理数据集的业务库连接仍由管理端独立配置。
 
 ## 接口使用
 
@@ -68,7 +85,7 @@ uv run fastapi dev main.py --host 127.0.0.1 --port 8001
 | 模型训练 | `uv run python -m service.training_worker` |
 | 神经因果溯源 | `.venv/Scripts/python.exe -m service.neural_trace_worker`（Windows）；`.venv/bin/python -m service.neural_trace_worker`（Linux） |
 
-API 与 worker 使用同一配置、SQLite 数据库和任务文件目录；未启动 worker 时，任务会保持待执行状态。治理任务需配置业务数据库、数据版本及治理模型；训练按任务类型准备数据和运行环境。训练源码仅接受可信代码。
+API 与 worker 使用同一配置、MySQL 数据库和任务文件目录；未启动 worker 时，任务会保持待执行状态。治理任务需配置业务数据库、数据版本及治理模型；训练按任务类型准备数据和运行环境。训练源码仅接受可信代码。
 
 神经因果溯源还需安装 `neurotrace-run/requirements.txt` 中的依赖，准备模型清单指定的本地权重和案例材料，并使用兼容的 GPU 环境。API 启动时不会加载这些权重。
 
@@ -85,6 +102,15 @@ bash start-content-security.sh stop
 脚本使用 `.venv/bin/python`，日志位于 `logs/`。
 
 ## 测试
+
+测试必须使用独立库，默认 `content_security_llm_test`，仅清理其中的 `llm_` 表。先由数据库管理员创建该库并授予测试账号权限：
+
+```sql
+CREATE DATABASE content_security_llm_test CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
+GRANT ALL PRIVILEGES ON content_security_llm_test.* TO 'your_test_user'@'your_test_host';
+```
+
+测试默认从私有配置读取连接信息，可通过 `TEST_MYSQL_HOST`、`TEST_MYSQL_PORT`、`TEST_MYSQL_USER`、`TEST_MYSQL_PASSWORD` 覆盖。`TEST_MYSQL_DATABASE` 必须以 `_test` 结尾且与主库不同。测试子进程继承相同的测试连接，不使用真实服务库。
 
 ```shell
 uv run python -m pytest

@@ -20,7 +20,7 @@ def main() -> None:
     args = parser.parse_args()
 
     settings = Settings.load()
-    database = Database(settings.database_path)
+    database = Database(settings)
     database.initialize()
     repository = GovernanceRepository(database)
     config = GovernanceConfigRepository(database)
@@ -29,7 +29,7 @@ def main() -> None:
         repository, BusinessGovernanceData(config, manager.cipher,
                                            mock_samples=settings.governance_mock_samples), manager, config,
     )
-    with exclusive_lock(database.path.parent / "governance-worker" / "worker.lock",
+    with exclusive_lock(database.data_dir / "governance-worker" / "worker.lock",
                         "治理 worker 已运行，只允许单实例"):
         repository.recover_running()
         while True:

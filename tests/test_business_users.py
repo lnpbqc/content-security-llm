@@ -36,7 +36,7 @@ def client(tmp_path, monkeypatch):
         return httpx.Response(upstream["status"], json=upstream["body"])
 
     monkeypatch.setattr(httpx.HTTPTransport, "handle_request", handle_request)
-    settings = Settings(tmp_path / "app.sqlite3", "s" * 32, Fernet.generate_key(),
+    settings = Settings(tmp_path / "db", "s" * 32, Fernet.generate_key(),
                         business_api_base_url="https://business.example/api/v1/")
     with TestClient(create_app(settings)) as api:
         yield api, upstream, calls

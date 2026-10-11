@@ -1,6 +1,5 @@
-"""SQLite queries and row conversion."""
+"""MySQL queries and row conversion."""
 
-import sqlite3
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
@@ -10,7 +9,7 @@ from .entities import AuthRecord, CallRecord, ModelRecord
 from utils.time import utc_now
 
 
-def _model_from_row(row: sqlite3.Row) -> ModelRecord:
+def _model_from_row(row: Dict[str, Any]) -> ModelRecord:
     return ModelRecord(
         id=row["id"],
         upstream_model_id=row["upstream_model_id"],
@@ -24,7 +23,7 @@ def _model_from_row(row: sqlite3.Row) -> ModelRecord:
     )
 
 
-def _call_from_row(row: sqlite3.Row) -> CallRecord:
+def _call_from_row(row: Dict[str, Any]) -> CallRecord:
     return CallRecord(
         id=row["id"],
         model_id=row["model_id"],
@@ -48,10 +47,10 @@ class ModelRepository:
         now = utc_now().isoformat()
         with self.database.connect() as connection:
             connection.execute(
-                """INSERT INTO models
+                """INSERT INTO llm_models
                    (id, upstream_model_id, name, description, base_url,
                     encrypted_api_key, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
                 (model_id, upstream_model_id, name, description, base_url,
                  encrypted_api_key, now, now),
             )
@@ -62,14 +61,14 @@ class ModelRepository:
     def get(self, model_id: str) -> Optional[ModelRecord]:
         with self.database.connect() as connection:
             row = connection.execute(
-                "SELECT * FROM models WHERE id = ? AND deleted_at IS NULL", (model_id,)
+                "SELECT * FROM llm_models WHERE id = %s AND deleted_at IS NULL", (model_id,)
             ).fetchone()
         return _model_from_row(row) if row else None
 
     def list(self) -> List[ModelRecord]:
         with self.database.connect() as connection:
             rows = connection.execute(
-                "SELECT * FROM models WHERE deleted_at IS NULL ORDER BY created_at DESC"
+                "SELECT * FROM llm_models WHERE deleted_at IS NULL ORDER BY created_at DESC"
             ).fetchall()
         return [_model_from_row(row) for row in rows]
 
@@ -80,12 +79,12 @@ class ModelRepository:
         if not set(changes).issubset(allowed):
             raise ValueError("Unsupported model field")
         fields = list(changes)
-        assignments = ", ".join("{} = ?".format(field) for field in fields)
+        assignments = ", ".join("{} = %s".format(field) for field in fields)
         values = [changes[field] for field in fields]
         values.extend([utc_now().isoformat(), model_id])
         with self.database.connect() as connection:
             cursor = connection.execute(
-                "UPDATE models SET {}, updated_at = ? WHERE id = ? AND deleted_at IS NULL".format(assignments),
+                "UPDATE llm_models SET {}, updated_at = %s WHERE id = %s AND deleted_at IS NULL".format(assignments),
                 values,
             )
             if cursor.rowcount == 0:
@@ -96,7 +95,7 @@ class ModelRepository:
         now = utc_now().isoformat()
         with self.database.connect() as connection:
             cursor = connection.execute(
-                "UPDATE models SET deleted_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL",
+                "UPDATE llm_models SET deleted_at = %s, updated_at = %s WHERE id = %s AND deleted_at IS NULL",
                 (now, now, model_id),
             )
             return cursor.rowcount > 0
@@ -112,19 +111,19 @@ class CallRepository:
         now = utc_now().isoformat()
         with self.database.connect() as connection:
             connection.execute(
-                """INSERT INTO call_records
+                """INSERT INTO llm_call_records
                    (id, model_id, token_hash, input, output_json, response_type, status, error_code, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                 (call_id, model_id, token_hash, input, output_json, response_type, status, error_code, now),
             )
-            row = connection.execute("SELECT * FROM call_records WHERE id = ?", (call_id,)).fetchone()
+            row = connection.execute("SELECT * FROM llm_call_records WHERE id = %s", (call_id,)).fetchone()
         return _call_from_row(row)
 
     def list(self, *, token_hash: str, limit: int, offset: int) -> List[CallRecord]:
         with self.database.connect() as connection:
             rows = connection.execute(
-                "SELECT * FROM call_records WHERE token_hash = ? "
-                "ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
+                "SELECT * FROM llm_call_records WHERE token_hash = %s "
+                "ORDER BY created_at DESC, id DESC LIMIT %s OFFSET %s",
                 (token_hash, limit, offset),
             ).fetchall()
         return [_call_from_row(row) for row in rows]
@@ -134,8 +133,8 @@ class CallRepository:
         with self.database.connect() as connection:
             rows = connection.execute(
                 "SELECT c.*, t.id AS token_id, t.label AS token_label "
-                "FROM call_records c LEFT JOIN auth_tokens t ON t.token_hash = c.token_hash "
-                "ORDER BY c.created_at DESC, c.id DESC LIMIT ? OFFSET ?",
+                "FROM llm_call_records c LEFT JOIN llm_auth_tokens t ON t.token_hash = c.token_hash "
+                "ORDER BY c.created_at DESC, c.id DESC LIMIT %s OFFSET %s",
                 (limit, offset),
             ).fetchall()
         return [{"record": _call_from_row(row), "token_id": row["token_id"],
@@ -151,8 +150,8 @@ class AuthRepository:
         now = utc_now().isoformat()
         with self.database.connect() as connection:
             connection.execute(
-                """INSERT INTO auth_tokens (id, token_hash, label, created_at, expires_at, enabled)
-                   VALUES (?, ?, ?, ?, ?, 1)""",
+                """INSERT INTO llm_auth_tokens (id, token_hash, label, created_at, expires_at, enabled)
+                   VALUES (%s, %s, %s, %s, %s, 1)""",
                 (token_id, token_hash, label, now, expires_at.isoformat()),
             )
         record = self.get(token_id)
@@ -162,7 +161,7 @@ class AuthRepository:
     def set_enabled(self, token_hash: str, enabled: bool) -> Optional[AuthRecord]:
         with self.database.connect() as connection:
             cursor = connection.execute(
-                "UPDATE auth_tokens SET enabled = ? WHERE token_hash = ? AND deleted_at IS NULL",
+                "UPDATE llm_auth_tokens SET enabled = %s WHERE token_hash = %s AND deleted_at IS NULL",
                 (int(enabled), token_hash),
             )
             if cursor.rowcount == 0:
@@ -173,7 +172,7 @@ class AuthRepository:
         """管理员按列表中的令牌 ID 启停，无需令牌原文。"""
         with self.database.connect() as connection:
             cursor = connection.execute(
-                "UPDATE auth_tokens SET enabled = ? WHERE id = ? AND deleted_at IS NULL",
+                "UPDATE llm_auth_tokens SET enabled = %s WHERE id = %s AND deleted_at IS NULL",
                 (int(enabled), token_id),
             )
             if cursor.rowcount == 0:
@@ -183,21 +182,21 @@ class AuthRepository:
     def set_all_enabled(self, enabled: bool) -> int:
         with self.database.connect() as connection:
             cursor = connection.execute(
-                "UPDATE auth_tokens SET enabled = ? WHERE deleted_at IS NULL", (int(enabled),)
+                "UPDATE llm_auth_tokens SET enabled = %s WHERE deleted_at IS NULL", (int(enabled),)
             )
             return cursor.rowcount
 
     def get(self, token_id: str) -> Optional[AuthRecord]:
         with self.database.connect() as connection:
             row = connection.execute(
-                "SELECT * FROM auth_tokens WHERE id = ? AND deleted_at IS NULL", (token_id,)
+                "SELECT * FROM llm_auth_tokens WHERE id = %s AND deleted_at IS NULL", (token_id,)
             ).fetchone()
         return self._from_row(row) if row is not None else None
 
     def get_by_hash(self, token_hash: str) -> Optional[AuthRecord]:
         with self.database.connect() as connection:
             row = connection.execute(
-                "SELECT * FROM auth_tokens WHERE token_hash = ? AND deleted_at IS NULL",
+                "SELECT * FROM llm_auth_tokens WHERE token_hash = %s AND deleted_at IS NULL",
                 (token_hash,),
             ).fetchone()
         return self._from_row(row) if row is not None else None
@@ -206,7 +205,7 @@ class AuthRepository:
         """列出令牌元数据，供管理员为旧令牌补充标签。"""
         with self.database.connect() as connection:
             rows = connection.execute(
-                "SELECT * FROM auth_tokens WHERE deleted_at IS NULL ORDER BY created_at DESC, id DESC"
+                "SELECT * FROM llm_auth_tokens WHERE deleted_at IS NULL ORDER BY created_at DESC, id DESC"
             ).fetchall()
         return [self._from_row(row) for row in rows]
 
@@ -214,8 +213,8 @@ class AuthRepository:
         """立即禁用并隐藏令牌，保留令牌行供历史调用关联。"""
         with self.database.connect() as connection:
             cursor = connection.execute(
-                "UPDATE auth_tokens SET enabled = 0, deleted_at = ? "
-                "WHERE id = ? AND deleted_at IS NULL",
+                "UPDATE llm_auth_tokens SET enabled = 0, deleted_at = %s "
+                "WHERE id = %s AND deleted_at IS NULL",
                 (utc_now().isoformat(), token_id),
             )
         return cursor.rowcount > 0
@@ -224,13 +223,13 @@ class AuthRepository:
         """仅为未标注的令牌设置标签，避免历史调用归属被改写。"""
         with self.database.connect() as connection:
             cursor = connection.execute(
-                "UPDATE auth_tokens SET label = ? WHERE id = ? AND label = '' AND deleted_at IS NULL",
+                "UPDATE llm_auth_tokens SET label = %s WHERE id = %s AND label = '' AND deleted_at IS NULL",
                 (label, token_id),
             )
         return cursor.rowcount > 0
 
     @staticmethod
-    def _from_row(row: sqlite3.Row) -> AuthRecord:
+    def _from_row(row: Dict[str, Any]) -> AuthRecord:
         return AuthRecord(
             id=row["id"],
             token_hash=row["token_hash"],

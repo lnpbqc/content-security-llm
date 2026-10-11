@@ -53,7 +53,7 @@ def run_command(command, cwd, log_path):
 class NeuralTraceWorker:
     def __init__(self, repository, run_root=None):
         self.repository = repository
-        self.run_root = Path(run_root) if run_root else repository.database.path.parent / "neural-trace-runs"
+        self.run_root = Path(run_root) if run_root else repository.database.data_dir / "neural-trace-runs"
 
     def run_once(self):
         task = self.repository.claim()
@@ -137,14 +137,14 @@ def main():
         print("模型文件和依赖存在；尚未验证 CUDA、权重加载或实际 GPU 实验。")
         return
     settings = Settings.load()
-    database = Database(settings.database_path)
+    database = Database(settings)
     database.initialize()
     repository = NeuralTraceRepository(database)
     worker = NeuralTraceWorker(repository)
     def stop(signum, frame):
         raise SystemExit(128 + signum)
     signal.signal(signal.SIGTERM, stop)
-    with exclusive_lock(database.path.parent / "neural-trace-worker" / "worker.lock", "神经溯源 worker 已运行。"):
+    with exclusive_lock(database.data_dir / "neural-trace-worker" / "worker.lock", "神经溯源 worker 已运行。"):
         repository.recover_running()
         while True:
             worked = worker.run_once()

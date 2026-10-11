@@ -1,4 +1,4 @@
-"""隔离 SQLite + 本地真实 HTTP + GPU 训练验收，不读取真实服务配置。"""
+"""隔离 MySQL + 本地真实 HTTP + GPU 训练验收，不读取真实服务配置。"""
 
 import argparse
 import json
@@ -29,11 +29,16 @@ def main():
     parser.add_argument("--train-samples", type=int, default=10000)
     parser.add_argument("--validation-samples", type=int, default=2000)
     parser.add_argument("--device", choices=["cuda", "cpu"], default="cuda")
+    parser.add_argument("--mysql-database", required=True, help="dedicated database ending in _test")
     args = parser.parse_args()
+    if not args.mysql_database.endswith("_test"):
+        parser.error("--mysql-database must end in _test")
     root = PROJECT_ROOT / "db" / "script-training-validation"
     root.mkdir(parents=True, exist_ok=True)
     setup_secret, token = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
-    settings = Settings(root / "validation.sqlite3", setup_secret, Fernet.generate_key())
+    settings = Settings(root, setup_secret, Fernet.generate_key(), mysql_database=args.mysql_database)
+    from db.database import Database
+    Database(settings).create_schema()
     app = create_app(settings)
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", log_level="warning", access_log=False))
     listener = socket.socket()

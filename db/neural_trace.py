@@ -25,9 +25,9 @@ class NeuralTraceRepository:
         task_id, now = str(uuid4()), utc_now().isoformat()
         with self.database.connect() as connection:
             connection.execute(
-                """INSERT INTO neural_trace_tasks
+                """INSERT INTO llm_neural_trace_tasks
                    (id, token_hash, case_id, input_json, status, stage, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, 'pending', 'queued', ?, ?)""",
+                   VALUES (%s, %s, %s, %s, 'pending', 'queued', %s, %s)""",
                 (task_id, token_hash, case_id, json.dumps(snapshot, ensure_ascii=False), now, now),
             )
         return self.get(task_id, token_hash)
@@ -35,42 +35,42 @@ class NeuralTraceRepository:
     def get(self, task_id, token_hash):
         with self.database.connect() as connection:
             return decode(connection.execute(
-                "SELECT * FROM neural_trace_tasks WHERE id = ? AND token_hash = ?",
+                "SELECT * FROM llm_neural_trace_tasks WHERE id = %s AND token_hash = %s",
                 (task_id, token_hash),
             ).fetchone())
 
     def list(self, token_hash, limit, offset):
         with self.database.connect() as connection:
             total = connection.execute(
-                "SELECT count(*) FROM neural_trace_tasks WHERE token_hash = ?", (token_hash,),
-            ).fetchone()[0]
+                "SELECT COUNT(*) AS total FROM llm_neural_trace_tasks WHERE token_hash = %s", (token_hash,),
+            ).fetchone()["total"]
             rows = connection.execute(
-                """SELECT * FROM neural_trace_tasks WHERE token_hash = ?
-                   ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?""", (token_hash, limit, offset),
+                """SELECT * FROM llm_neural_trace_tasks WHERE token_hash = %s
+                   ORDER BY created_at DESC, id DESC LIMIT %s OFFSET %s""", (token_hash, limit, offset),
             ).fetchall()
         return {"items": [decode(row) for row in rows], "total": total}
 
     def claim(self):
         with self.database.connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+            connection.execute("START TRANSACTION")
             row = connection.execute(
-                "SELECT * FROM neural_trace_tasks WHERE status = 'pending' ORDER BY created_at, id LIMIT 1"
+                "SELECT * FROM llm_neural_trace_tasks WHERE status = 'pending' ORDER BY created_at, id LIMIT 1 FOR UPDATE"
             ).fetchone()
             if row is None:
                 return None
             now = utc_now().isoformat()
             connection.execute(
-                """UPDATE neural_trace_tasks SET status = 'running', stage = 'preflight',
-                   started_at = ?, updated_at = ? WHERE id = ?""", (now, now, row["id"]),
+                """UPDATE llm_neural_trace_tasks SET status = 'running', stage = 'preflight',
+                   started_at = %s, updated_at = %s WHERE id = %s""", (now, now, row["id"]),
             )
             return decode(connection.execute(
-                "SELECT * FROM neural_trace_tasks WHERE id = ?", (row["id"],),
+                "SELECT * FROM llm_neural_trace_tasks WHERE id = %s", (row["id"],),
             ).fetchone())
 
     def stage(self, task_id, stage):
         with self.database.connect() as connection:
             connection.execute(
-                "UPDATE neural_trace_tasks SET stage = ?, updated_at = ? WHERE id = ? AND status = 'running'",
+                "UPDATE llm_neural_trace_tasks SET stage = %s, updated_at = %s WHERE id = %s AND status = 'running'",
                 (stage, utc_now().isoformat(), task_id),
             )
 
@@ -78,9 +78,9 @@ class NeuralTraceRepository:
         now = utc_now().isoformat()
         with self.database.connect() as connection:
             connection.execute(
-                """UPDATE neural_trace_tasks SET status = ?, result_json = ?, error_message = ?,
-                   stage = CASE WHEN ? IS NULL THEN 'completed' ELSE stage END,
-                   finished_at = ?, updated_at = ? WHERE id = ? AND status = 'running'""",
+                """UPDATE llm_neural_trace_tasks SET status = %s, result_json = %s, error_message = %s,
+                   stage = CASE WHEN %s IS NULL THEN 'completed' ELSE stage END,
+                   finished_at = %s, updated_at = %s WHERE id = %s AND status = 'running'""",
                 ("failed" if error_message else "succeeded",
                  json.dumps(result, ensure_ascii=False, allow_nan=False) if result is not None else None,
                  error_message, error_message, now, now, task_id),
@@ -91,7 +91,7 @@ class NeuralTraceRepository:
         now = utc_now().isoformat()
         with self.database.connect() as connection:
             connection.execute(
-                """UPDATE neural_trace_tasks SET status = 'failed', error_message = ?,
-                   finished_at = ?, updated_at = ? WHERE status = 'running'""",
+                """UPDATE llm_neural_trace_tasks SET status = 'failed', error_message = %s,
+                   finished_at = %s, updated_at = %s WHERE status = 'running'""",
                 ("worker 中断，任务未完成；请重新提交任务。", now, now),
             )

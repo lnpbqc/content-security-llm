@@ -28,7 +28,7 @@ OTHER = {"Authorization": "Bearer " + "b" * 64}
 
 @pytest.fixture
 def api(tmp_path):
-    with TestClient(create_app(Settings(tmp_path / "app.sqlite3", "s" * 32, Fernet.generate_key()))) as client:
+    with TestClient(create_app(Settings(tmp_path / "db", "s" * 32, Fernet.generate_key()))) as client:
         for token in ("a" * 64, "b" * 64):
             response = client.post("/api/auth/token", headers={"X-Setup-Secret": "s" * 32}, json={
                 "token": token, "expires_at": (utc_now() + timedelta(days=1)).isoformat()})

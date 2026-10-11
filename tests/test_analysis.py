@@ -89,7 +89,7 @@ def api(tmp_path):
         return OpenAI(**kwargs, max_retries=0,
                       http_client=httpx.Client(transport=httpx.MockTransport(handle)))
 
-    with TestClient(create_app(Settings(tmp_path / "app.sqlite3", "s" * 32, Fernet.generate_key()),
+    with TestClient(create_app(Settings(tmp_path / "db", "s" * 32, Fernet.generate_key()),
                                client_factory=factory)) as client:
         for token in ("a" * 64, "b" * 64):
             assert client.post("/api/auth/token", headers={"X-Setup-Secret": "s" * 32}, json={
@@ -445,7 +445,7 @@ def test_saved_success_and_failure_survive_app_restart(api):
     original = post(client, "scenarios", scenario(model)).json()["data"]
     upstream["queue"] = ["invalid json"]
     failure = post(client, "scenarios", scenario(model)).json()["data"]
-    settings = Settings(client.app.state.database.path, "s" * 32, Fernet.generate_key())
+    settings = Settings(client.app.state.database.data_dir, "s" * 32, Fernet.generate_key())
     with TestClient(create_app(settings)) as restarted:
         for saved in (original, failure):
             found = restarted.get("/api/v1/analysis/records/" + saved["id"], headers=auth())

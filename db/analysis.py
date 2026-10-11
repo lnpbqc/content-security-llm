@@ -15,9 +15,9 @@ class AnalysisRepository:
         record_id = str(uuid4())
         with self.database.connect() as connection:
             connection.execute(
-                """INSERT INTO analysis_records
+                """INSERT INTO llm_analysis_records
                    (id, token_hash, kind, scenario_code, model_id, input_json, state_json, status, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?)""",
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, 'running', %s)""",
                 (record_id, token_hash, kind, payload.get("scenario_code"), payload["model_id"],
                  json.dumps(payload, ensure_ascii=False), json.dumps(state), utc_now().isoformat()),
             )
@@ -26,7 +26,7 @@ class AnalysisRepository:
     def save(self, record_id, token_hash, state):
         with self.database.connect() as connection:
             connection.execute(
-                "UPDATE analysis_records SET state_json=?, status=? WHERE id=? AND token_hash=?",
+                "UPDATE llm_analysis_records SET state_json=%s, status=%s WHERE id=%s AND token_hash=%s",
                 (json.dumps(state, ensure_ascii=False), state["status"], record_id, token_hash),
             )
 
@@ -34,13 +34,13 @@ class AnalysisRepository:
         """单 API 实例启动时结束上次中断的分析，保留输入和已有调用。"""
         finished_at = utc_now().isoformat()
         with self.database.connect() as connection:
-            rows = connection.execute("SELECT id, state_json FROM analysis_records WHERE status='running'").fetchall()
+            rows = connection.execute("SELECT id, state_json FROM llm_analysis_records WHERE status='running'").fetchall()
             for row in rows:
                 state = json.loads(row["state_json"])
                 state.update(status="failed", error_code="analysis_interrupted",
                              error_message="模型分析因服务中断而终止，请重新提交", finished_at=finished_at)
                 connection.execute(
-                    "UPDATE analysis_records SET state_json=?, status='failed' WHERE id=? AND status='running'",
+                    "UPDATE llm_analysis_records SET state_json=%s, status='failed' WHERE id=%s AND status='running'",
                     (json.dumps(state, ensure_ascii=False), row["id"]),
                 )
 
@@ -53,23 +53,23 @@ class AnalysisRepository:
 
     def get(self, record_id, token_hash):
         with self.database.connect() as connection:
-            row = connection.execute("SELECT * FROM analysis_records WHERE id=? AND token_hash=?",
+            row = connection.execute("SELECT * FROM llm_analysis_records WHERE id=%s AND token_hash=%s",
                                      (record_id, token_hash)).fetchone()
         return self.public(row) if row else None
 
     def list(self, token_hash, page, page_size, kind=None, scenario_code=None, status=None):
-        where, values = ["token_hash=?"], [token_hash]
+        where, values = ["token_hash=%s"], [token_hash]
         for column, value in (("kind", kind), ("scenario_code", scenario_code), ("status", status)):
             if value is not None:
-                where.append(column + "=?")
+                where.append(column + "=%s")
                 values.append(value)
         clause = " AND ".join(where)
         with self.database.connect() as connection:
-            total = connection.execute("SELECT COUNT(*) FROM analysis_records WHERE " + clause,
-                                       values).fetchone()[0]
+            total = connection.execute("SELECT COUNT(*) AS total FROM llm_analysis_records WHERE " + clause,
+                                       values).fetchone()["total"]
             rows = connection.execute(
-                "SELECT * FROM analysis_records WHERE " + clause +
-                " ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
+                "SELECT * FROM llm_analysis_records WHERE " + clause +
+                " ORDER BY created_at DESC, id DESC LIMIT %s OFFSET %s",
                 [*values, page_size, (page - 1) * page_size],
             ).fetchall()
         return {"items": [self.public(row) for row in rows], "total": total,

@@ -34,7 +34,7 @@ def _result(row: Any) -> Optional[Dict[str, Any]]:
 
 
 class GovernanceRepository:
-    """集中处理三张治理表的 SQLite 读写。"""
+    """集中处理治理表的 MySQL 读写。"""
     def __init__(self, database: Database):
         """保存用于访问治理表的数据库连接入口。"""
         self.database = database
@@ -46,20 +46,20 @@ class GovernanceRepository:
         now = utc_now().isoformat()
         with self.database.connect() as connection:
             connection.execute(
-                """INSERT INTO governance_tasks
+                """INSERT INTO llm_governance_tasks
                    (id, kind, token_hash, name, scope_json, model_id, model_version,
                     status, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)""",
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, 'pending', %s, %s)""",
                 (task_id, kind, token_hash, name, scope_json(scope), model_id, model_version, now, now),
             )
         return self.get_task(task_id, token_hash)
 
     def get_task(self, task_id: str, token_hash: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """按任务 ID 查询；提供令牌摘要时只允许查该令牌的任务。"""
-        query = "SELECT * FROM governance_tasks WHERE id = ?"
+        query = "SELECT * FROM llm_governance_tasks WHERE id = %s"
         params = [task_id]
         if token_hash is not None:
-            query += " AND token_hash = ?"
+            query += " AND token_hash = %s"
             params.append(token_hash)
         with self.database.connect() as connection:
             row = connection.execute(query, params).fetchone()
@@ -71,12 +71,12 @@ class GovernanceRepository:
         params = (token_hash, kind, scope_json(scope))
         with self.database.connect() as connection:
             total = connection.execute(
-                "SELECT count(*) FROM governance_tasks WHERE token_hash = ? AND kind = ? AND scope_json = ?",
+                "SELECT COUNT(*) AS total FROM llm_governance_tasks WHERE token_hash = %s AND kind = %s AND scope_json = %s",
                 params,
-            ).fetchone()[0]
+            ).fetchone()["total"]
             rows = connection.execute(
-                """SELECT * FROM governance_tasks WHERE token_hash = ? AND kind = ? AND scope_json = ?
-                   ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?""",
+                """SELECT * FROM llm_governance_tasks WHERE token_hash = %s AND kind = %s AND scope_json = %s
+                   ORDER BY created_at DESC, id DESC LIMIT %s OFFSET %s""",
                 (*params, limit, offset),
             ).fetchall()
         return {"items": [_task(row) for row in rows], "total": total}
@@ -85,32 +85,32 @@ class GovernanceRepository:
         """worker 重启时将中断的 running 任务放回待处理队列。"""
         with self.database.connect() as connection:
             connection.execute(
-                "UPDATE governance_tasks SET status = 'pending', updated_at = ? WHERE status = 'running'",
+                "UPDATE llm_governance_tasks SET status = 'pending', updated_at = %s WHERE status = 'running'",
                 (utc_now().isoformat(),),
             )
 
     def claim(self) -> Optional[Dict[str, Any]]:
         """原子领取最早的 pending 任务并改为 running。"""
         with self.database.connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+            connection.execute("START TRANSACTION")
             row = connection.execute(
-                "SELECT * FROM governance_tasks WHERE status = 'pending' ORDER BY created_at, id LIMIT 1"
+                "SELECT * FROM llm_governance_tasks WHERE status = 'pending' ORDER BY created_at, id LIMIT 1 FOR UPDATE"
             ).fetchone()
             if row is None:
                 return None
             connection.execute(
-                "UPDATE governance_tasks SET status = 'running', updated_at = ? WHERE id = ?",
+                "UPDATE llm_governance_tasks SET status = 'running', updated_at = %s WHERE id = %s",
                 (utc_now().isoformat(), row["id"]),
             )
             return _task(connection.execute(
-                "SELECT * FROM governance_tasks WHERE id = ?", (row["id"],)
+                "SELECT * FROM llm_governance_tasks WHERE id = %s", (row["id"],)
             ).fetchone())
 
     def sample_outcomes(self, task_id: str) -> Dict[str, Dict[str, Any]]:
         """读取任务已保存的逐样本检查点，供续跑和汇总使用。"""
         with self.database.connect() as connection:
             rows = connection.execute(
-                "SELECT * FROM governance_task_samples WHERE task_id = ?", (task_id,)
+                "SELECT * FROM llm_governance_task_samples WHERE task_id = %s", (task_id,)
             ).fetchall()
         return {row["sample_id"]: {
             "status": row["status"],
@@ -123,10 +123,10 @@ class GovernanceRepository:
         """首次保存一条样本的成功输出或错误，不覆盖已有检查点。"""
         with self.database.connect() as connection:
             connection.execute(
-                """INSERT INTO governance_task_samples
+                """INSERT INTO llm_governance_task_samples
                    (task_id, sample_id, status, output_json, error_code)
-                   VALUES (?, ?, ?, ?, ?)
-                   ON CONFLICT(task_id, sample_id) DO NOTHING""",
+                   VALUES (%s, %s, %s, %s, %s)
+                   ON DUPLICATE KEY UPDATE task_id = VALUES(task_id)""",
                 (task_id, sample_id, "error" if error_code else "success",
                  json.dumps(output, ensure_ascii=False) if output is not None else None, error_code),
             )
@@ -137,16 +137,16 @@ class GovernanceRepository:
         now = utc_now().isoformat()
         with self.database.connect() as connection:
             connection.execute(
-                """INSERT INTO governance_results
+                """INSERT INTO llm_governance_results
                    (id, task_id, kind, token_hash, scope_json, summary_json, samples_json, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
                 (result_id, task["id"], task["kind"], task["token_hash"],
                  scope_json(task["scope"]), json.dumps(summary, ensure_ascii=False),
                  json.dumps(samples, ensure_ascii=False), now),
             )
             connection.execute(
-                """UPDATE governance_tasks SET status = 'succeeded', result_id = ?, updated_at = ?
-                   WHERE id = ? AND status = 'running'""",
+                """UPDATE llm_governance_tasks SET status = 'succeeded', result_id = %s, updated_at = %s
+                   WHERE id = %s AND status = 'running'""",
                 (result_id, now, task["id"]),
             )
 
@@ -154,8 +154,8 @@ class GovernanceRepository:
         """将运行中的任务标记为失败并保存失败原因。"""
         with self.database.connect() as connection:
             connection.execute(
-                """UPDATE governance_tasks SET status = 'failed', error_message = ?, updated_at = ?
-                   WHERE id = ? AND status = 'running'""",
+                """UPDATE llm_governance_tasks SET status = 'failed', error_message = %s, updated_at = %s
+                   WHERE id = %s AND status = 'running'""",
                 (message, utc_now().isoformat(), task_id),
             )
 
@@ -164,7 +164,7 @@ class GovernanceRepository:
         """仅向创建者令牌返回指定类型的结果快照。"""
         with self.database.connect() as connection:
             row = connection.execute(
-                "SELECT * FROM governance_results WHERE id = ? AND token_hash = ? AND kind = ?",
+                "SELECT * FROM llm_governance_results WHERE id = %s AND token_hash = %s AND kind = %s",
                 (result_id, token_hash, kind),
             ).fetchone()
         return _result(row)
@@ -172,10 +172,10 @@ class GovernanceRepository:
     def list_results(self, kind: str, token_hash: str,
                      scope: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         """按令牌和类型读取快照；指定范围时做完整匹配，新的排在前面。"""
-        query = "SELECT * FROM governance_results WHERE token_hash = ? AND kind = ?"
+        query = "SELECT * FROM llm_governance_results WHERE token_hash = %s AND kind = %s"
         params = [token_hash, kind]
         if scope is not None:
-            query += " AND scope_json = ?"
+            query += " AND scope_json = %s"
             params.append(scope_json(scope))
         query += " ORDER BY created_at DESC, id DESC"
         with self.database.connect() as connection:

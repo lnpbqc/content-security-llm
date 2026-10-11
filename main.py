@@ -48,7 +48,7 @@ def create_app(
     async def lifespan(application: FastAPI):
         """启动时初始化数据库和治理任务使用的共享服务。"""
         runtime_settings = settings or Settings.load()
-        database = Database(runtime_settings.database_path)
+        database = Database(runtime_settings)
         database.initialize()
         application.state.database = database
         application.state.neural_trace_service = NeuralTraceService(NeuralTraceRepository(database))

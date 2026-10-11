@@ -2,7 +2,7 @@
 
 import hashlib
 import hmac
-import sqlite3
+from pymysql import IntegrityError
 from datetime import datetime
 from typing import Optional
 
@@ -40,7 +40,7 @@ class AuthService:
         digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
         try:
             return self.repository.create(digest, expires_at, label)
-        except sqlite3.IntegrityError as exc:
+        except IntegrityError as exc:
             raise TokenAlreadyExistsError from exc
 
     def set_token_enabled(self, setup_secret: Optional[str], token: str,

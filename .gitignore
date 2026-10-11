@@ -1,42 +1,39 @@
-# Python-generated files
+# Python、本机环境及缓存
 __pycache__/
 *.py[oc]
+*.egg-info
+.venv
+.python-runtime/
+.uv-cache/
+.pytest_cache/
+/.pytest-tmp-*/
 build/
 dist/
 wheels/
-*.egg-info
 
-# Virtual environments
-.venv
-.pytest_cache/
-.uv-cache/
-.python-runtime/
+# 运行日志、任务产物及本地数据库
 /logs/
-db/training-runs/
+db/*-runs/
+db/*-worker/
 db/training-data/
 db/script-training-validation/
-db/governance-worker/
+db/backups/
+db/*.sqlite3*
+/neurotrace-run/models/
+/neurotrace-run/.cache/
+/neurotrace-run/outputs/
 
-# Local database and secrets
-db/*.sqlite3
-db/*.sqlite3-*
+# 本地文档、数据及私有配置
 .env
-settings.local.json
-**.md
-!/README.md
-**.txt
-
-# 忽略所有 .json
+*.md
+*.txt
 *.json
-# 只放行项目根目录下的示例配置
-!/settings.example.json
-# 忽略所有 .csv
 *.csv
-
-
 docs/
+!/README.md
+!/settings.example.json
 
-# Neural causal tracing: required dependencies and case inputs
+# 溯源运行必需的依赖及案例输入
 !/neurotrace-run/requirements.txt
 !/neurotrace-run/configs/model_manifest.json
 !/neurotrace-run/data/manual_review.csv
@@ -45,11 +42,3 @@ docs/
 !/neurotrace-run/inputs/*/token_alignment.json
 !/neurotrace-run/inputs/*/clean_prompt.txt
 !/neurotrace-run/inputs/*/poison_prompt.txt
-
-
-# Neural causal tracing: local model downloads and task artifacts
-/neurotrace-run/models/
-/neurotrace-run/.cache/
-/neurotrace-run/outputs/
-/db/neural-trace-runs/
-/db/neural-trace-worker/

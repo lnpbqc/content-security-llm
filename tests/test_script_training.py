@@ -53,7 +53,7 @@ def context(tmp_path, monkeypatch):
     script = tmp_path / "registered.py"
     script.write_text(PRELUDE, encoding="utf-8")
     monkeypatch.setitem(SCRIPTS, "text-example", ScriptDefinition("文本统计", "无分类指标", script, Inputs, Parameters))
-    app = create_app(Settings(tmp_path / "app.sqlite3", "s" * 32, Fernet.generate_key()))
+    app = create_app(Settings(tmp_path / "db", "s" * 32, Fernet.generate_key()))
     with TestClient(app) as client:
         for label in ("a", "b"):
             app.state.auth_service.create_token("s" * 32, label * 32, utc_now() + timedelta(days=1))
@@ -318,16 +318,18 @@ time.sleep(60)
     launcher = repository.root.parent / "worker_launcher.py"
     launcher.write_text('''import sys
 from pathlib import Path
+from config import Settings
 from db.database import Database
 from db.training import TrainingRepository
 from service.training_worker import TrainingWorker
-TrainingWorker(TrainingRepository(Database(Path(sys.argv[1]))), None).run_once()
+from dataclasses import replace
+TrainingWorker(TrainingRepository(Database(replace(Settings.load(), data_dir=Path(sys.argv[1])))), None).run_once()
 ''', encoding="utf-8")
     from pathlib import Path
     environment = {**os.environ, "PYTHONPATH": os.pathsep.join([
         os.getcwd(), str(Path(sys.prefix) / "Lib" / "site-packages"), os.environ.get("PYTHONPATH", "")])}
     executable = sys._base_executable if os.name == "nt" else sys.executable
-    process = subprocess.Popen([executable, str(launcher), str(repository.database.path)],
+    process = subprocess.Popen([executable, str(launcher), str(repository.database.data_dir)],
                                env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     try:
         path = repository.directory(task["id"]) / "outputs" / "pids.json"

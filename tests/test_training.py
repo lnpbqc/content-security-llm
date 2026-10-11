@@ -52,7 +52,7 @@ def train(directory, values=None, canceled=lambda: False):
 
 @pytest.fixture
 def training_client(tmp_path):
-    settings = Settings(tmp_path / "app.sqlite3", "s" * 32, Fernet.generate_key())
+    settings = Settings(tmp_path / "db", "s" * 32, Fernet.generate_key())
     app = create_app(settings)
     with TestClient(app) as client:
         for label in ("a", "b"):
@@ -393,7 +393,7 @@ def test_worker_single_instance_and_restart_does_not_requeue(training_client):
         with pytest.raises(RuntimeError, match="单实例"):
             with worker_lock(repository.root):
                 pass
-    restarted = TrainingRepository(Database(app.state.database.path))
+    restarted = TrainingRepository(Database(app.state.database.settings))
     restarted.recover()
     assert restarted.get(task["id"])["status"] == "failed"
     assert len(restarted.metrics(task["id"])["items"]) == 1

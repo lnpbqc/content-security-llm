@@ -68,7 +68,7 @@ def analysis_api(tmp_path):
         return OpenAI(**kwargs, max_retries=0,
                       http_client=httpx.Client(transport=httpx.MockTransport(handle)))
 
-    settings = Settings(tmp_path / "app.sqlite3", "s" * 32, Fernet.generate_key())
+    settings = Settings(tmp_path / "db", "s" * 32, Fernet.generate_key())
     with TestClient(create_app(settings, client_factory=client_factory)) as client:
         for token in ("a" * 64, "b" * 64):
             response = client.post("/api/auth/token", headers={"X-Setup-Secret": "s" * 32},

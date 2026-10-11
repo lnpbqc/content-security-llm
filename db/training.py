@@ -23,7 +23,7 @@ def encode(value):
 class TrainingRepository:
     def __init__(self, database: Database):
         self.database = database
-        self.root = database.path.parent / "training-runs"
+        self.root = database.data_dir / "training-runs"
 
     def directory(self, task_id: str) -> Path:
         return self.root / task_id
@@ -33,18 +33,18 @@ class TrainingRepository:
         source_hash = sha256(config["python_source"].encode("utf-8")).hexdigest()
         with self.database.connect() as connection:
             connection.execute(
-                """INSERT INTO training_tasks
+                """INSERT INTO llm_training_tasks
                    (id, token_hash, config_json, source_hash, status, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, 'pending', ?, ?)""",
+                   VALUES (%s, %s, %s, %s, 'pending', %s, %s)""",
                 (task_id, token_hash, encode(config), source_hash, now, now),
             )
         return self.get(task_id, token_hash)
 
     def get(self, task_id: str, token_hash: str | None = None) -> dict | None:
         with self.database.connect() as connection:
-            query, args = "SELECT * FROM training_tasks WHERE id = ?", [task_id]
+            query, args = "SELECT * FROM llm_training_tasks WHERE id = %s", [task_id]
             if token_hash is not None:
-                query += " AND token_hash = ?"
+                query += " AND token_hash = %s"
                 args.append(token_hash)
             row = connection.execute(query, args).fetchone()
         if row is None:
@@ -57,10 +57,10 @@ class TrainingRepository:
 
     def list(self, token_hash: str, page: int, page_size: int) -> dict:
         with self.database.connect() as connection:
-            total = connection.execute("SELECT COUNT(*) FROM training_tasks WHERE token_hash = ?",
-                                       (token_hash,)).fetchone()[0]
+            total = connection.execute("SELECT COUNT(*) AS total FROM llm_training_tasks WHERE token_hash = %s",
+                                       (token_hash,)).fetchone()["total"]
             rows = connection.execute(
-                "SELECT id FROM training_tasks WHERE token_hash = ? ORDER BY created_at DESC, id LIMIT ? OFFSET ?",
+                "SELECT id FROM llm_training_tasks WHERE token_hash = %s ORDER BY created_at DESC, id LIMIT %s OFFSET %s",
                 (token_hash, page_size, (page - 1) * page_size),
             ).fetchall()
         return {"items": [self.public(self.get(row["id"], token_hash)) for row in rows],
@@ -69,15 +69,15 @@ class TrainingRepository:
 
     def claim(self) -> dict | None:
         with self.database.connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
+            connection.execute("START TRANSACTION")
             row = connection.execute(
-                "SELECT id FROM training_tasks WHERE status = 'pending' ORDER BY created_at, id LIMIT 1"
+                "SELECT id FROM llm_training_tasks WHERE status = 'pending' ORDER BY created_at, id LIMIT 1 FOR UPDATE"
             ).fetchone()
             if row is None:
                 return None
             now = utc_now().isoformat()
             connection.execute(
-                "UPDATE training_tasks SET status = 'running', started_at = ?, updated_at = ? WHERE id = ?",
+                "UPDATE llm_training_tasks SET status = 'running', started_at = %s, updated_at = %s WHERE id = %s",
                 (now, now, row["id"]),
             )
         return self.get(row["id"])
@@ -86,10 +86,11 @@ class TrainingRepository:
         now = utc_now().isoformat()
         with self.database.connect() as connection:
             connection.execute(
-                """UPDATE training_tasks SET
-                   status = CASE WHEN status = 'pending' THEN 'canceled' ELSE 'canceling' END,
-                   finished_at = CASE WHEN status = 'pending' THEN ? ELSE finished_at END,
-                   updated_at = ? WHERE id = ? AND token_hash = ? AND status IN ('pending', 'running')""",
+                """UPDATE llm_training_tasks SET
+                   finished_at = CASE WHEN status = 'pending' THEN %s ELSE finished_at END,
+                   updated_at = %s,
+                   status = CASE WHEN status = 'pending' THEN 'canceled' ELSE 'canceling' END
+                   WHERE id = %s AND token_hash = %s AND status IN ('pending', 'running')""",
                 (now, now, task_id, token_hash),
             )
         return self.get(task_id, token_hash)
@@ -101,38 +102,38 @@ class TrainingRepository:
         with self.database.connect() as connection:
             # 已接受的取消请求优先于与其并发发生的训练完成。
             connection.execute(
-                """UPDATE training_tasks SET
-                   status = CASE WHEN status = 'canceling' THEN 'canceled' ELSE ? END,
-                   error_message = ?, finished_at = ?, updated_at = ?,
-                   progress = CASE WHEN ? = 'succeeded' AND status != 'canceling' THEN 100 ELSE progress END
-                   WHERE id = ? AND status IN ('running', 'canceling')""",
-                (status, error, now, now, status, task_id),
+                """UPDATE llm_training_tasks SET
+                   error_message = %s, finished_at = %s, updated_at = %s,
+                   progress = CASE WHEN %s = 'succeeded' AND status != 'canceling' THEN 100 ELSE progress END,
+                   status = CASE WHEN status = 'canceling' THEN 'canceled' ELSE %s END
+                   WHERE id = %s AND status IN ('running', 'canceling')""",
+                (error, now, now, status, status, task_id),
             )
 
     def recover(self):
         now = utc_now().isoformat()
         with self.database.connect() as connection:
             connection.execute(
-                """UPDATE training_tasks SET status = 'failed', error_message = '训练 worker 中断；请新建任务重试',
-                   updated_at = ?, finished_at = ? WHERE status IN ('running', 'canceling')""", (now, now),
+                """UPDATE llm_training_tasks SET status = 'failed', error_message = '训练 worker 中断；请新建任务重试',
+                   updated_at = %s, finished_at = %s WHERE status IN ('running', 'canceling')""", (now, now),
             )
 
     def runtime(self, task_id: str, metadata: dict):
         with self.database.connect() as connection:
-            connection.execute("UPDATE training_tasks SET runtime_json = ?, updated_at = ? WHERE id = ?",
+            connection.execute("UPDATE llm_training_tasks SET runtime_json = %s, updated_at = %s WHERE id = %s",
                                (encode(metadata), utc_now().isoformat(), task_id))
 
     def record_metric(self, task_id: str, event: dict):
         now = utc_now().isoformat()
         with self.database.connect() as connection:
             connection.execute(
-                """INSERT INTO training_metrics (task_id, epoch, step, phase, metrics_json, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
+                """INSERT INTO llm_training_metrics (task_id, epoch, step, phase, metrics_json, created_at)
+                   VALUES (%s, %s, %s, %s, %s, %s)""",
                 (task_id, event["epoch"], event["step"], event["phase"], encode(event["metrics"]), now),
             )
             connection.execute(
-                """UPDATE training_tasks SET epoch = ?, step = ?, progress = ?,
-                   latest_metrics_json = ?, updated_at = ? WHERE id = ?""",
+                """UPDATE llm_training_tasks SET epoch = %s, step = %s, progress = %s,
+                   latest_metrics_json = %s, updated_at = %s WHERE id = %s""",
                 (event["epoch"], event["step"], event["progress"], encode(event["metrics"]), now, task_id),
             )
 
@@ -141,7 +142,7 @@ class TrainingRepository:
             return self.script_events(task_id, after_id, limit, "metric")
         with self.database.connect() as connection:
             rows = connection.execute(
-                "SELECT * FROM training_metrics WHERE task_id = ? AND id > ? ORDER BY id LIMIT ?",
+                "SELECT * FROM llm_training_metrics WHERE task_id = %s AND id > %s ORDER BY id LIMIT %s",
                 (task_id, after_id, limit + 1),
             ).fetchall()
         items = []
@@ -156,22 +157,22 @@ class TrainingRepository:
         now = utc_now().isoformat()
         with self.database.connect() as connection:
             connection.execute(
-                "INSERT INTO training_script_events (task_id, type, event_json, created_at) VALUES (?, ?, ?, ?)",
+                "INSERT INTO llm_training_script_events (task_id, type, event_json, created_at) VALUES (%s, %s, %s, %s)",
                 (task_id, event["type"], encode(event), now),
             )
-            connection.execute("UPDATE training_tasks SET updated_at = ? WHERE id = ?", (now, task_id))
+            connection.execute("UPDATE llm_training_tasks SET updated_at = %s WHERE id = %s", (now, task_id))
             if event["type"] == "metric":
-                connection.execute("UPDATE training_tasks SET latest_metrics_json = ? WHERE id = ?",
+                connection.execute("UPDATE llm_training_tasks SET latest_metrics_json = %s WHERE id = %s",
                                    (encode(event["metrics"]), task_id))
 
     def script_events(self, task_id: str, after_id: int = 0, limit: int = 200, event_type=None):
         with self.database.connect() as connection:
-            query = "SELECT * FROM training_script_events WHERE task_id = ? AND id > ?"
+            query = "SELECT * FROM llm_training_script_events WHERE task_id = %s AND id > %s"
             args = [task_id, after_id]
             if event_type is not None:
-                query += " AND type = ?"
+                query += " AND type = %s"
                 args.append(event_type)
-            rows = connection.execute(query + " ORDER BY id LIMIT ?", (*args, limit + 1)).fetchall()
+            rows = connection.execute(query + " ORDER BY id LIMIT %s", (*args, limit + 1)).fetchall()
         items = [{**json.loads(row["event_json"]), "id": row["id"], "task_id": task_id,
                   "created_at": row["created_at"]} for row in rows[:limit]]
         return {"items": items, "next_after_id": items[-1]["id"] if items else after_id,
@@ -183,7 +184,7 @@ class TrainingRepository:
             latest = {}
             for event_type in ("metric", "progress"):
                 row = connection.execute(
-                    "SELECT event_json FROM training_script_events WHERE task_id = ? AND type = ? ORDER BY id DESC LIMIT 1",
+                    "SELECT event_json FROM llm_training_script_events WHERE task_id = %s AND type = %s ORDER BY id DESC LIMIT 1",
                     (task["id"], event_type),
                 ).fetchone()
                 latest[event_type] = json.loads(row["event_json"]) if row else {}
@@ -210,17 +211,17 @@ class TrainingRepository:
                 digest.update(chunk)
         with self.database.connect() as connection:
             connection.execute(
-                """INSERT INTO training_artifacts (id, task_id, filename, kind, epoch, loss, size, sha256)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(task_id, filename) DO UPDATE SET
-                   epoch=excluded.epoch, loss=excluded.loss, size=excluded.size, sha256=excluded.sha256""",
+                """INSERT INTO llm_training_artifacts (id, task_id, filename, kind, epoch, loss, size, sha256)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                   ON DUPLICATE KEY UPDATE
+                   epoch=VALUES(epoch), loss=VALUES(loss), size=VALUES(size), sha256=VALUES(sha256)""",
                 (str(uuid4()), task_id, filename, kind, epoch, loss, path.stat().st_size, digest.hexdigest()),
             )
 
     def artifacts(self, task_id: str) -> list[dict]:
         with self.database.connect() as connection:
             return [dict(row) for row in connection.execute(
-                "SELECT * FROM training_artifacts WHERE task_id = ? ORDER BY kind, filename", (task_id,)
+                "SELECT * FROM llm_training_artifacts WHERE task_id = %s ORDER BY kind, filename", (task_id,)
             )]
 
     def public(self, task: dict) -> dict:
@@ -229,12 +230,12 @@ class TrainingRepository:
         config = {key: value for key, value in task["config"].items() if key != "python_source"}
         with self.database.connect() as connection:
             history = connection.execute(
-                "SELECT epoch, metrics_json FROM training_metrics WHERE task_id = ? AND phase = 'validation' ORDER BY id",
+                "SELECT epoch, metrics_json FROM llm_training_metrics WHERE task_id = %s AND phase = 'validation' ORDER BY id",
                 (task["id"],),
             ).fetchall()
         history = [{"epoch": row["epoch"], **json.loads(row["metrics_json"])} for row in history]
         with self.database.connect() as connection:
-            latest = connection.execute("SELECT phase FROM training_metrics WHERE task_id = ? ORDER BY id DESC LIMIT 1",
+            latest = connection.execute("SELECT phase FROM llm_training_metrics WHERE task_id = %s ORDER BY id DESC LIMIT 1",
                                         (task["id"],)).fetchone()
         checkpoints = [{"name": item["filename"], "artifact_id": item["id"], "epoch": item["epoch"],
                         "loss": item["loss"]} for item in self.artifacts(task["id"]) if item["kind"] == "weights"]

@@ -157,7 +157,7 @@ def app_client(tmp_path: Path):
     FakeCompletionClient.invalid_value = False
     FakeCompletionClient.invalid_dimension_name = False
     business = FakeBusinessDatabase()
-    settings = Settings(tmp_path / "app.sqlite3", "s" * 32, Fernet.generate_key())
+    settings = Settings(tmp_path / "db", "s" * 32, Fernet.generate_key())
     app = create_app(settings, client_factory=FakeCompletionClient)
     with TestClient(app) as client:
         app.state.test_settings = settings
@@ -266,7 +266,7 @@ def test_mock_samples_preserve_source_errors(app_client, failure, message):
         business.unavailable = True
     elif failure == "missing_config":
         with app.state.database.connect() as connection:
-            connection.execute("DELETE FROM business_database_config")
+            connection.execute("DELETE FROM llm_business_database_config")
     with pytest.raises((ValueError, RuntimeError), match=message):
         data.samples(scope("general-v1"))
     assert not FakeCompletionClient.calls
@@ -276,7 +276,7 @@ def test_mock_settings_default_and_api_wiring(tmp_path, monkeypatch):
     """配置默认关闭；开启后注入 API 的治理样本读取器。"""
     path = tmp_path / "settings.json"
     config = {"setup_secret": "s" * 32, "credential_key": Fernet.generate_key().decode(),
-              "database_path": "mock.sqlite3"}
+              "data_dir": "mock"}
     path.write_text(json.dumps(config), encoding="utf-8")
     monkeypatch.setenv("APP_CONFIG_FILE", str(path))
     assert Settings.load().governance_mock_samples is False
@@ -333,7 +333,7 @@ def test_governance_worker_locks_before_recovering_tasks(app_client, monkeypatch
     monkeypatch.setattr(governance_worker.Settings, "load", lambda: app.state.test_settings)
     monkeypatch.setattr(governance_worker, "GovernanceService", lambda *args: SimpleNamespace(run_once=lambda: False))
     monkeypatch.setattr(sys, "argv", ["governance_worker", "--once"])
-    directory = app.state.database.path.parent / "governance-worker"
+    directory = app.state.database.data_dir / "governance-worker"
     with worker_lock(directory):
         with pytest.raises(RuntimeError, match="治理 worker.*单实例"):
             governance_worker.main()
@@ -636,7 +636,7 @@ def test_missing_model_configuration_rejects_creation(app_client):
     """验证缺少模型配置与缺少令牌时不会创建任务。"""
     app, client, _, business = app_client
     with app.state.database.connect() as connection:
-        connection.execute("DELETE FROM governance_model_bindings WHERE kind = ?", ("governance-risk",))
+        connection.execute("DELETE FROM llm_governance_model_bindings WHERE kind = %s", ("governance-risk",))
     response = client.post("/api/v1/data-governance/risk-tasks", headers=headers(),
                            json={"kind": "governance-risk", "name": "检测",
                                  "input": scope("risk-v1", 1)})
@@ -721,7 +721,7 @@ def test_business_rows_are_ordered_and_all_fields_become_model_text(app_client):
     assert detail["dataset_name"] == "自定义数据集"
     assert detail["target_count"] == 2
     with app.state.database.connect() as connection:
-        tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        tables = {row["TABLE_NAME"] for row in connection.execute("SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE()")}
     assert "governance_dataset_versions" not in tables
     assert "governance_source_samples" not in tables
 
@@ -733,7 +733,7 @@ def test_source_failures_mark_pending_task_failed_without_model_call(app_client,
     service = app.state.governance_service
     if failure == "missing_config":
         with app.state.database.connect() as connection:
-            connection.execute("DELETE FROM business_database_config")
+            connection.execute("DELETE FROM llm_business_database_config")
     elif failure == "unavailable":
         business.unavailable = True
     elif failure == "missing_dataset":
@@ -763,7 +763,7 @@ def test_admin_config_is_persistent_encrypted_and_requires_setup_secret(app_clie
                       "username": "reader", "password_configured": True}
     assert "secret" not in json.dumps(public)
     with app.state.database.connect() as connection:
-        stored = connection.execute("SELECT * FROM business_database_config").fetchone()
+        stored = connection.execute("SELECT * FROM llm_business_database_config").fetchone()
     assert stored["encrypted_password"] != "secret"
     assert "secret" not in stored["encrypted_password"]
     assert client.put("/api/v1/admin/governance/models/governance-value", headers=admin,
@@ -869,8 +869,9 @@ def test_admin_soft_deletes_token_and_keeps_call_attribution(app_client):
     assert calls[0]["token_label"] == "前端"
 
 
-def test_existing_auth_table_gains_label_without_losing_tokens(tmp_path):
-    """验证已有 SQLite 令牌表在初始化时仅补充标签列。"""
+def test_existing_sqlite_tokens_import_with_missing_label(tmp_path):
+    """旧 SQLite 标签缺失时，在只读导入时补默认值。"""
+    from scripts.migrate_sqlite_to_mysql import migrate
     path = tmp_path / "existing.sqlite3"
     with sqlite3.connect(path) as connection:
         connection.execute("CREATE TABLE auth_tokens (id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, "
@@ -878,17 +879,17 @@ def test_existing_auth_table_gains_label_without_losing_tokens(tmp_path):
         connection.execute("INSERT INTO auth_tokens VALUES (?, ?, ?, ?, ?)",
                            ("old", "hash", utc_now().isoformat(),
                             (utc_now() + timedelta(days=1)).isoformat(), 1))
-    database = Database(path)
-    database.initialize()
+    database = Database(Settings.load())
+    migrate(path, database)
     with database.connect() as connection:
-        row = connection.execute("SELECT id, label, deleted_at FROM auth_tokens WHERE id = 'old'").fetchone()
-    assert dict(row) == {"id": "old", "label": "", "deleted_at": None}
+        row = connection.execute("SELECT id, label, deleted_at FROM llm_auth_tokens WHERE id = 'old'").fetchone()
+    assert row == {"id": "old", "label": "", "deleted_at": None}
 
 
-def test_app_starts_without_mysql_and_worker_marks_task_failed(tmp_path):
+def test_app_starts_without_business_database_and_worker_marks_task_failed(tmp_path):
     """验证未配置业务库时仍可启动建单，worker 失败且不调用模型。"""
     FakeCompletionClient.calls = []
-    settings = Settings(tmp_path / "app.sqlite3", "s" * 32, Fernet.generate_key())
+    settings = Settings(tmp_path / "db", "s" * 32, Fernet.generate_key())
     app = create_app(settings, client_factory=FakeCompletionClient)
     with TestClient(app) as client:
         manager = app.state.model_manager
@@ -978,7 +979,7 @@ def test_business_database_test_requires_admin_before_connection(app_client, cre
 def test_business_database_test_without_saved_configuration(app_client):
     app, client, _, business = app_client
     with app.state.database.connect() as connection:
-        connection.execute("DELETE FROM business_database_config")
+        connection.execute("DELETE FROM llm_business_database_config")
     response = client.post("/api/v1/admin/governance/business-database/test",
                            headers={"X-Setup-Secret": "s" * 32})
     assert response.status_code == 409
@@ -1055,7 +1056,7 @@ def test_business_database_test_connection_errors_hide_private_details(app_clien
 def test_business_database_test_invalid_encrypted_password_never_connects(app_client):
     app, client, _, business = app_client
     with app.state.database.connect() as connection:
-        connection.execute("UPDATE business_database_config SET encrypted_password='invalid'")
+        connection.execute("UPDATE llm_business_database_config SET encrypted_password='invalid'")
     response = client.post("/api/v1/admin/governance/business-database/test",
                            headers={"X-Setup-Secret": "s" * 32})
     assert response.status_code == 500
