@@ -69,7 +69,7 @@ def stage_outputs():
     }
 
 
-def fake_gpu(monkeypatch, tmp_path, fail_stage=None, invalid_stage=None):
+def fake_gpu(monkeypatch, tmp_path, fail_stage=None, invalid_stage=None, allow_busy_gpu=False):
     model = tmp_path / "model"
     model.mkdir()
     (model / "config.json").write_text("{}", encoding="utf-8")
@@ -86,7 +86,9 @@ def fake_gpu(monkeypatch, tmp_path, fail_stage=None, invalid_stage=None):
         if stage == fail_stage:
             raise RuntimeError("测试子进程失败")
         assert command[0] == sys.executable
-        assert "--allow-busy-gpu" not in command and "--overwrite" not in command
+        assert ("--allow-busy-gpu" in command) == (
+            allow_busy_gpu and stage in ("layer_scan", "activation_difference", "component_scan"))
+        assert "--overwrite" not in command
         directory = Path(command[command.index("--output-dir") + 1])
         if stage == "prepare_inputs":
             path = directory / CASE / "token_alignment.json"
@@ -248,6 +250,19 @@ def test_busy_gpu_does_not_start_model(api, monkeypatch, tmp_path):
     task = api.get(BASE + "/tasks/" + task_id, headers=AUTH).json()["data"]
     assert task["status"] == "failed" and task["stage"] == "preflight" and "GPU 已有" in task["error_message"]
     assert seen == []
+
+
+def test_allow_busy_gpu_cli_runs_pipeline(api, monkeypatch, tmp_path):
+    seen = fake_gpu(monkeypatch, tmp_path, allow_busy_gpu=True)
+    monkeypatch.setattr(worker_module.subprocess, "run", lambda *a, **k: pytest.fail("显式允许时不应检查进程占用"))
+    monkeypatch.setattr(worker_module.Settings, "load", lambda: None)
+    monkeypatch.setattr(worker_module, "Database", lambda settings: api.app.state.database)
+    monkeypatch.setattr(worker_module.signal, "signal", lambda *a: None)
+    monkeypatch.setattr(sys, "argv", ["neural_trace_worker", "--once", "--allow-busy-gpu"])
+    task_id = submit(api)
+    worker_module.main()
+    task = api.get(BASE + "/tasks/" + task_id, headers=AUTH).json()["data"]
+    assert task["status"] == "succeeded" and seen == list(STAGES)
 
 
 def test_interrupted_worker_marks_task_failed(api, monkeypatch, tmp_path):

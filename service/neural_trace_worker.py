@@ -51,9 +51,10 @@ def run_command(command, cwd, log_path):
 
 
 class NeuralTraceWorker:
-    def __init__(self, repository, run_root=None):
+    def __init__(self, repository, run_root=None, allow_busy_gpu=True):
         self.repository = repository
         self.run_root = Path(run_root) if run_root else repository.database.data_dir / "neural-trace-runs"
+        self.allow_busy_gpu = allow_busy_gpu
 
     def run_once(self):
         task = self.repository.claim()
@@ -66,10 +67,11 @@ class NeuralTraceWorker:
             if missing:
                 raise RuntimeError("缺少溯源依赖：" + ", ".join(missing))
             # 原始脚本的文档阶段也会加载模型，须在它开始前检查共享 GPU。
-            gpu = subprocess.run(["nvidia-smi", "--query-compute-apps=pid", "--format=csv,noheader,nounits"],
-                                 capture_output=True, text=True, check=True)
-            if gpu.stdout.strip():
-                raise RuntimeError("GPU 已有计算进程，请等待空闲后重新提交。")
+            if not self.allow_busy_gpu:
+                gpu = subprocess.run(["nvidia-smi", "--query-compute-apps=pid", "--format=csv,noheader,nounits"],
+                                     capture_output=True, text=True, check=True)
+                if gpu.stdout.strip():
+                    raise RuntimeError("GPU 已有计算进程，请等待空闲后重新提交。")
             result = self.execute(task)
             self.repository.finish(task["id"], result=result)
         except BaseException as error:
@@ -117,6 +119,8 @@ class NeuralTraceWorker:
         for stage, (script, arguments) in zip(STAGES, commands):
             self.repository.stage(task["id"], stage)
             command = [sys.executable, str(TRACE_ROOT / "forensics" / script), *map(str, arguments)]
+            if self.allow_busy_gpu and stage in ("layer_scan", "activation_difference", "component_scan"):
+                command.append("--allow-busy-gpu")
             run_command(command, TRACE_ROOT, directory / f"{stage}.log")
             checked_result(outputs[stage], case_id, stage)
         self.repository.stage(task["id"], "collect_result")
@@ -127,6 +131,7 @@ def main():
     parser = argparse.ArgumentParser(description="串行执行神经因果溯源任务；不会在启动时加载模型")
     parser.add_argument("--once", action="store_true", help="最多执行一个任务后退出")
     parser.add_argument("--check", action="store_true", help="只检查模型文件和依赖存在性，不加载模型、不领取任务")
+    parser.add_argument("--allow-busy-gpu", action="store_true", help="允许 GPU 已有进程时继续，并传递给扫描脚本")
     args = parser.parse_args()
     if args.check:
         check_model()
@@ -140,7 +145,7 @@ def main():
     database = Database(settings)
     database.initialize()
     repository = NeuralTraceRepository(database)
-    worker = NeuralTraceWorker(repository)
+    worker = NeuralTraceWorker(repository, allow_busy_gpu=args.allow_busy_gpu)
     def stop(signum, frame):
         raise SystemExit(128 + signum)
     signal.signal(signal.SIGTERM, stop)
