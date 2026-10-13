@@ -27,7 +27,7 @@ def migrate(source_path, database):
     try:
         source_tables = {row[0] for row in source.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
-        known = {table.removeprefix("llm_") for table in TABLES}
+        known = {table.removeprefix("llm_") for table in TABLES} | {"business_database_config"}
         if source_tables - known:
             raise ValueError("Unrecognized SQLite tables: " + ", ".join(sorted(source_tables - known)))
         report = {}

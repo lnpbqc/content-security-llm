@@ -27,11 +27,11 @@ uv sync --python 3.11
 | 配置项 | 说明 |
 | --- | --- |
 | `setup_secret` | 至少 32 个字符的随机管理员密钥。 |
-| `credential_key` | Fernet 加密密钥，用于保存模型 API Key 和业务库密码；重启、迁移时保持不变。 |
+| `credential_key` | Fernet 加密密钥，用于保存模型 API Key；重启、迁移时保持不变。 |
 | `data_dir` | 本地任务文件目录，默认 `db`，相对配置文件所在目录解析。 |
 | `mysql_host` / `mysql_port` | 主存储 MySQL 地址和端口，默认 `127.0.0.1:3306`。 |
 | `mysql_user` / `mysql_password` | MySQL 账号和密码；密码必须配置。 |
-| `mysql_database` | MySQL 库名，默认 `content_safety`；本项目只使用 `llm_` 表。 |
+| `mysql_database` | MySQL 库名，默认 `content_safety`；本项目维护 `llm_` 表，并只读查询业务数据集表。 |
 | `business_api_base_url` | 业务 HTTP 接口根地址，默认 `http://127.0.0.1:8000/api/v1`。 |
 | `governance_mock_samples` | 治理任务的空记录模拟开关，默认 `false`。 |
 
@@ -58,11 +58,11 @@ uv run fastapi dev main.py --host 127.0.0.1 --port 8001
 uv run python -m scripts.init_mysql
 ```
 
-建表 SQL 位于 [db/mysql_schema.sql](db/mysql_schema.sql)，也可通过 MySQL 客户端在目标库中执行该文件。脚本复用这份 SQL，按依赖顺序创建 14 张 `llm_` 表并检查结构；使用 MySQL 8.4、InnoDB 和 utf8mb4，包含主键、唯一约束、外键、状态约束及任务查询索引。重复执行不会清空已有数据；已有不兼容的表会报错，不自动改表。
+建表 SQL 位于 [db/mysql_schema.sql](db/mysql_schema.sql)，也可通过 MySQL 客户端在目标库中执行该文件。脚本复用这份 SQL，按依赖顺序创建 13 张 `llm_` 表并检查结构；使用 MySQL 8.4、InnoDB 和 utf8mb4，包含主键、唯一约束、外键、状态约束及任务查询索引。重复执行不会清空已有数据；已有不兼容的表会报错，不自动改表。
 
 建表完成后启动 API 和所需 worker。API 和 worker 启动只检查结构，不自动建表。建表账号需有 CREATE 权限，运行账号需有 SELECT/INSERT/UPDATE/DELETE 权限。本项目使用 `llm_` 前缀，与业务后端已有的无前缀表分开。
 
-本机 Docker MySQL 地址为 `127.0.0.1:13306`，服务器按实际地址配置（常见端口 3306）。治理数据集的业务库连接仍由管理端独立配置。
+本机 Docker MySQL 地址为 `127.0.0.1:13306`，服务器按实际地址配置（常见端口 3306）。治理和源码训练复用同一 MySQL 连接，只读查询业务表 `datasets`、`dataset_records`；运行账号还需对这两张表有 SELECT 权限。
 
 ## 接口使用
 
@@ -85,7 +85,7 @@ uv run python -m scripts.init_mysql
 | 模型训练 | `uv run python -m service.training_worker` |
 | 神经因果溯源 | `.venv/Scripts/python.exe -m service.neural_trace_worker`（Windows）；`.venv/bin/python -m service.neural_trace_worker`（Linux） |
 
-API 与 worker 使用同一配置、MySQL 数据库和任务文件目录；未启动 worker 时，任务会保持待执行状态。治理任务需配置业务数据库、数据版本及治理模型；训练按任务类型准备数据和运行环境。训练源码仅接受可信代码。
+API 与 worker 使用同一配置、MySQL 数据库和任务文件目录；未启动 worker 时，任务会保持待执行状态。治理任务需指定数据版本及治理模型；训练按任务类型准备数据和运行环境。训练源码仅接受可信代码。
 
 神经因果溯源还需安装 `neurotrace-run/requirements.txt` 中的依赖，将 Qwen3-4B 权重放在 `neurotrace-run/models/Qwen3-4B`，保留 `neurotrace-run/data/manual_review.csv` 及对应 `data/upstream/<case_id>/E1.json`、`E2.json`，GPU 需支持 CUDA 和 BF16。API 启动时不会加载这些权重，溯源 worker 领取任务后才加载。
 

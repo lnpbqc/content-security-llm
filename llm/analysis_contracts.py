@@ -40,8 +40,8 @@ class ScenarioRequest(StrictModel):
             raise ValueError("材料 ID 必须唯一，input 保留给输入正文")
         if self.target_language and self.scenario_code != "cross_cultural":
             raise ValueError("只有跨文化场景支持目标语言")
-        if len(self.content) + sum(len(item.content) for item in self.materials) > 200000:
-            raise ValueError("正文及材料合计不能超过 200000 字符")
+        if len(self.content) + sum(len(item.content) for item in self.materials) > 100000:
+            raise ValueError("正文及材料合计不能超过 100000 字符")
         return self
 
 
@@ -207,8 +207,8 @@ class AuditRequest(StrictModel):
             if not set(step.evidence_refs) <= evidence or not set(step.rule_refs) <= rules:
                 raise ValueError("输入步骤引用不存在的证据或规则")
         total = sum(len(s.detail) for s in self.steps) + sum(len(e.content) for e in self.evidence)
-        if total + sum(len(r.text) for r in self.rules) > 200000:
-            raise ValueError("步骤、证据及规则合计不能超过 200000 字符")
+        if total + sum(len(r.text) for r in self.rules) > 100000:
+            raise ValueError("步骤、证据及规则合计不能超过 100000 字符")
         return self
 
 

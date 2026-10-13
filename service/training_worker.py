@@ -13,9 +13,7 @@ from pathlib import Path
 
 from config import PROJECT_ROOT, Settings
 from db.database import Database
-from db.governance_config import GovernanceConfigRepository
 from db.training import TrainingRepository, encode
-from llm.models import ModelManager
 from service.governance_data import BusinessGovernanceData
 from utils.locking import exclusive_lock
 
@@ -154,9 +152,7 @@ def main():
     database = Database(settings)
     database.initialize()
     repository = TrainingRepository(database)
-    config = GovernanceConfigRepository(database)
-    manager = ModelManager(database, settings.credential_key)
-    worker = TrainingWorker(repository, BusinessGovernanceData(config, manager.cipher))
+    worker = TrainingWorker(repository, BusinessGovernanceData(database))
     with worker_lock(repository.root):
         repository.recover()
         while True:

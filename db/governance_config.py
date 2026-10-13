@@ -1,6 +1,6 @@
-"""保存治理任务的选模绑定和业务 MySQL 连接配置。"""
+"""保存治理任务的选模绑定。"""
 
-from typing import Any, Dict, Optional
+from typing import Dict, Optional
 
 from db.database import Database
 from utils.time import utc_now
@@ -35,24 +35,4 @@ class GovernanceConfigRepository:
                 "ON DUPLICATE KEY UPDATE model_id = VALUES(model_id), "
                 "updated_at = VALUES(updated_at)",
                 (kind, model_id, utc_now().isoformat()),
-            )
-
-    def get_business_database(self) -> Optional[Dict[str, Any]]:
-        """读取业务库连接元数据及密文，只有服务端可调用。"""
-        with self.database.connect() as connection:
-            row = connection.execute("SELECT * FROM llm_business_database_config WHERE id = 1").fetchone()
-        return dict(row) if row else None
-
-    def set_business_database(self, *, host: str, port: int, database_name: str,
-                              username: str, encrypted_password: str) -> None:
-        """原子更新唯一一条业务库连接配置。"""
-        with self.database.connect() as connection:
-            connection.execute(
-                "INSERT INTO llm_business_database_config "
-                "(id, host, port, database_name, username, encrypted_password, updated_at) "
-                "VALUES (1, %s, %s, %s, %s, %s, %s) ON DUPLICATE KEY UPDATE "
-                "host = VALUES(host), port = VALUES(port), database_name = VALUES(database_name), "
-                "username = VALUES(username), encrypted_password = VALUES(encrypted_password), "
-                "updated_at = VALUES(updated_at)",
-                (host, port, database_name, username, encrypted_password, utc_now().isoformat()),
             )

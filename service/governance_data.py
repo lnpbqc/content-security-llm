@@ -3,13 +3,9 @@
 import json
 import logging
 import re
-from time import perf_counter
 from typing import Any, Callable, Dict, List, Optional
 
-from cryptography.fernet import InvalidToken
-
-from db.governance_config import GovernanceConfigRepository
-from utils.time import utc_now
+from db.database import Database
 
 
 
@@ -37,89 +33,16 @@ RISK_RULES = [
 ]
 
 
-def _connect_mysql(**kwargs):
-    """延迟加载 MySQL 驱动，应用建单和启动时均不连接业务库。"""
-    import pymysql
-
-    return pymysql.connect(cursorclass=pymysql.cursors.DictCursor, **kwargs)
-
-
-class BusinessDatabaseTestError(Exception):
-    """管理员连接检测的安全错误，不向调用方暴露驱动或凭据原文。"""
-
-    def __init__(self, code: str, message: str, status_code: int = 502):
-        super().__init__(message)
-        self.code = code
-        self.status_code = status_code
-
-
 class BusinessGovernanceData:
-    """从业务库读取数据，规则暂沿用本服务的固定治理方案。"""
+    """从共享 MySQL 的业务表读取数据，规则暂沿用本服务的固定治理方案。"""
 
-    def __init__(self, config: GovernanceConfigRepository, cipher: Any,
-                 connection_factory: Optional[Callable[..., Any]] = None,
+    def __init__(self, database: Database,
+                 connection_factory: Optional[Callable[[], Any]] = None,
                  mock_samples: bool = False):
-        """保存 SQLite 配置入口；测试可注入模拟数据库连接。"""
-        self.config = config
-        self.cipher = cipher
-        self.connection_factory = connection_factory or _connect_mysql
+        """复用主存储连接；测试可注入模拟数据库连接。"""
+        self.connection_factory = connection_factory or database.connect
         self.mock_samples = mock_samples
         self._names = {}
-
-    def _connect(self):
-        """读取并解密管理员配置，连接失败时隐藏凭据。"""
-        details = self.config.get_business_database()
-        if details is None:
-            raise RuntimeError("业务数据库连接未配置")
-        try:
-            return self.connection_factory(
-                host=details["host"], port=details["port"], user=details["username"],
-                password=self.cipher.decrypt(details["encrypted_password"].encode("ascii")).decode("utf-8"),
-                database=details["database_name"], charset="utf8mb4",
-                connect_timeout=10, read_timeout=30,
-            )
-        except Exception as exc:
-            raise RuntimeError("业务数据库连接失败") from exc
-
-    def test_connection(self) -> Dict[str, Any]:
-        """只读检查已保存配置及治理字段，不读取业务正文或使用模拟样本。"""
-        started = perf_counter()
-        try:
-            connection = self._connect()
-        except RuntimeError as exc:
-            if str(exc) == "业务数据库连接未配置":
-                raise BusinessDatabaseTestError("business_database_not_configured",
-                                                "请先保存业务数据库配置", 409) from exc
-            cause = exc.__cause__
-            if isinstance(cause, InvalidToken):
-                raise BusinessDatabaseTestError("business_database_credentials_invalid",
-                                                "已保存的数据库密码无法解密，请检查 credential_key 或重新保存配置", 500) from exc
-            code = cause.args[0] if cause is not None and cause.args else None
-            messages = {1045: "数据库账号或密码错误，或该账号不允许从本服务主机访问",
-                        1049: "配置的数据库不存在，请检查库名",
-                        2003: "无法连接 MySQL，请检查主机、端口及数据库服务状态",
-                        2013: "MySQL 连接中断或响应超时"}
-            message = messages.get(code, "业务数据库连接失败，请检查连接配置、网络及数据库服务")
-            raise BusinessDatabaseTestError("business_database_connection_failed", message) from exc
-        checks = ["connection"]
-        name = "query"
-        try:
-            with connection.cursor() as cursor:
-                for name, sql in (
-                    ("query", "SELECT 1"),
-                    ("datasets", "SELECT id, name, version FROM datasets LIMIT 0"),
-                    ("dataset_records", "SELECT id, dataset_id, payload FROM dataset_records LIMIT 0"),
-                ):
-                    cursor.execute(sql)
-                    checks.append(name)
-        except Exception as exc:
-            raise BusinessDatabaseTestError("business_database_query_failed",
-                "MySQL 已连通，但 {} 检查失败，请检查表结构及 SELECT 权限".format(name)) from exc
-        finally:
-            connection.close()
-        return {"connected": True, "checks": checks,
-                "elapsed_ms": round((perf_counter() - started) * 1000),
-                "checked_at": utc_now().isoformat()}
 
     def policy(self, kind: str, scheme_id: str) -> Dict[str, Any]:
         """按任务类型和方案版本返回固定评分标准或规则。"""
@@ -155,9 +78,8 @@ class BusinessGovernanceData:
         """核对当前版本，并按原始记录 ID 顺序读取该数据集的全部样本。"""
         dataset_id = scope["dataset_id"]
         version_id = scope["version_id"]
-        connection = self._connect()
         try:
-            try:
+            with self.connection_factory() as connection:
                 with connection.cursor() as cursor:
                     cursor.execute("SELECT name, version FROM datasets WHERE id = %s", (dataset_id,))
                     dataset = cursor.fetchone()
@@ -170,12 +92,10 @@ class BusinessGovernanceData:
                         (dataset_id,),
                     )
                     rows = cursor.fetchall()
-            except ValueError:
-                raise
-            except Exception as exc:
-                raise RuntimeError("业务数据库查询失败") from exc
-        finally:
-            connection.close()
+        except ValueError:
+            raise
+        except Exception as exc:
+            raise RuntimeError("业务数据库读取失败") from exc
         if not rows:
             if not self.mock_samples:
                 raise ValueError("数据集没有可治理的记录")

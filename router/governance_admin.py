@@ -1,4 +1,4 @@
-"""管理员配置治理任务模型、业务库连接和调用归属。"""
+"""管理员配置治理任务模型和调用归属。"""
 
 from typing import Literal, Optional
 
@@ -11,7 +11,6 @@ from schemas.auth import AdminTokenPublic, TokenStatusUpdate
 from schemas.calls import CallPublic
 from router.dependencies import require_admin
 from service.business_users import BusinessUsersTimeoutError, BusinessUsersUnavailableError
-from service.governance_data import BusinessDatabaseTestError
 
 
 router = APIRouter(prefix="/api/v1/admin", tags=["governance-admin"])
@@ -23,17 +22,6 @@ class ModelBinding(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     model_id: str = Field(min_length=1)
-
-
-class BusinessDatabaseInput(BaseModel):
-    """业务 MySQL 的五项私有连接参数。"""
-
-    model_config = ConfigDict(extra="forbid")
-    host: str = Field(min_length=1)
-    port: int = Field(ge=1, le=65535)
-    database: str = Field(min_length=1)
-    username: str = Field(min_length=1)
-    password: str = Field(min_length=1)
 
 
 class TokenLabelInput(BaseModel):
@@ -72,39 +60,6 @@ def set_model_binding(request: Request, kind: GovernanceKind, payload: ModelBind
         raise HTTPException(404, detail={"code": "model_not_found"}) from exc
     request.app.state.governance_config.set_model_id(kind, payload.model_id)
     return success(request, {"kind": kind, "model_id": payload.model_id})
-
-
-@router.get("/governance/business-database", dependencies=[Depends(require_admin)])
-def get_business_database(request: Request):
-    """只返回可公开给管理员的连接元数据，绝不返回密码。"""
-    details = request.app.state.governance_config.get_business_database()
-    if details is None:
-        return success(request, None)
-    return success(request, {"host": details["host"], "port": details["port"],
-                             "database": details["database_name"],
-                             "username": details["username"], "password_configured": True})
-
-
-@router.put("/governance/business-database", dependencies=[Depends(require_admin)])
-def set_business_database(request: Request, payload: BusinessDatabaseInput):
-    """用现有 Fernet 密钥加密密码并保存连接配置；不立即连接 MySQL。"""
-    cipher = request.app.state.model_manager.cipher
-    request.app.state.governance_config.set_business_database(
-        host=payload.host, port=payload.port, database_name=payload.database,
-        username=payload.username,
-        encrypted_password=cipher.encrypt(payload.password.encode("utf-8")).decode("ascii"),
-    )
-    return get_business_database(request)
-
-
-@router.post("/governance/business-database/test", dependencies=[Depends(require_admin)])
-def test_business_database(request: Request):
-    """真实检查已保存的业务 MySQL 连接和治理读取条件，不更改配置。"""
-    try:
-        result = request.app.state.governance_service.data.test_connection()
-    except BusinessDatabaseTestError as exc:
-        raise HTTPException(exc.status_code, detail={"code": exc.code, "message": str(exc)}) from exc
-    return success(request, result)
 
 
 @router.get("/tokens", dependencies=[Depends(require_admin)])

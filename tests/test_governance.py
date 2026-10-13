@@ -91,7 +91,7 @@ class FakeBusinessDatabase:
         self.queries = []
         self.unavailable = False
 
-    def connect(self, **kwargs):
+    def connect(self):
         """提供与 PyMySQL 连接一致的最小测试入口。"""
         if self.unavailable:
             raise OSError("database unavailable")
@@ -109,6 +109,12 @@ class FakeBusinessConnection:
     def cursor(self):
         """返回可用于 with 的模拟游标。"""
         return FakeBusinessCursor(self.database)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.close()
 
     def close(self):
         """模拟关闭连接。"""
@@ -161,6 +167,7 @@ def app_client(tmp_path: Path):
     app = create_app(settings, client_factory=FakeCompletionClient)
     with TestClient(app) as client:
         app.state.test_settings = settings
+        assert app.state.governance_service.data.connection_factory.__self__ is app.state.database
         app.state.governance_service.data.connection_factory = business.connect
         models = {}
         for kind in ("governance-value", "governance-anomaly", "governance-risk"):
@@ -173,11 +180,6 @@ def app_client(tmp_path: Path):
             response = client.put("/api/v1/admin/governance/models/" + kind,
                                   headers={"X-Setup-Secret": "s" * 32}, json={"model_id": model_id})
             assert response.status_code == 200, response.text
-        response = client.put("/api/v1/admin/governance/business-database",
-                              headers={"X-Setup-Secret": "s" * 32},
-                              json={"host": "localhost", "port": 3306, "database": "content_safety",
-                                    "username": "reader", "password": "secret"})
-        assert response.status_code == 200, response.text
         app.state.auth_service.create_token("s" * 32, "a" * 32, utc_now() + timedelta(days=1), "前端")
         app.state.auth_service.create_token("s" * 32, "b" * 32, utc_now() + timedelta(days=1), "业务后端")
         yield app, client, models["governance-value"], business
@@ -249,8 +251,7 @@ def test_mock_samples_never_replace_existing_records(app_client):
     ("empty", "数据集没有可治理的记录"),
     ("missing_dataset", "数据集不存在"),
     ("wrong_version", "数据集版本不匹配"),
-    ("unavailable", "业务数据库连接失败"),
-    ("missing_config", "业务数据库连接未配置"),
+    ("unavailable", "业务数据库读取失败"),
 ])
 def test_mock_samples_preserve_source_errors(app_client, failure, message):
     """模拟只对明确开启后的空记录生效，不掩盖其他错误。"""
@@ -264,9 +265,6 @@ def test_mock_samples_preserve_source_errors(app_client, failure, message):
         business.datasets[3]["version"] = "v2.0.0"
     elif failure == "unavailable":
         business.unavailable = True
-    elif failure == "missing_config":
-        with app.state.database.connect() as connection:
-            connection.execute("DELETE FROM llm_business_database_config")
     with pytest.raises((ValueError, RuntimeError), match=message):
         data.samples(scope("general-v1"))
     assert not FakeCompletionClient.calls
@@ -726,15 +724,12 @@ def test_business_rows_are_ordered_and_all_fields_become_model_text(app_client):
     assert "governance_source_samples" not in tables
 
 
-@pytest.mark.parametrize("failure", ["missing_config", "unavailable", "missing_dataset", "wrong_version", "no_rows"])
+@pytest.mark.parametrize("failure", ["unavailable", "missing_dataset", "wrong_version", "no_rows"])
 def test_source_failures_mark_pending_task_failed_without_model_call(app_client, failure):
-    """验证业务库无连接、无版本或无记录时仅保存失败任务。"""
+    """验证业务表不可读、无版本或无记录时仅保存失败任务。"""
     app, client, _, business = app_client
     service = app.state.governance_service
-    if failure == "missing_config":
-        with app.state.database.connect() as connection:
-            connection.execute("DELETE FROM llm_business_database_config")
-    elif failure == "unavailable":
+    if failure == "unavailable":
         business.unavailable = True
     elif failure == "missing_dataset":
         business.datasets.pop(3)
@@ -751,27 +746,33 @@ def test_source_failures_mark_pending_task_failed_without_model_call(app_client,
     assert FakeCompletionClient.calls == []
 
 
-def test_admin_config_is_persistent_encrypted_and_requires_setup_secret(app_client):
-    """验证配置入库、密码密文、管理员权限，以及重启后可读取。"""
-    app, client, model_id, business = app_client
+def test_governance_uses_shared_mysql_connection(app_client):
+    """治理建单不读取业务记录，执行时才读取共享库业务表。"""
+    app, client, _, business = app_client
+    created = create(client, "governance-value", "general-v1")
+    assert business.connections == 0
+    assert app.state.governance_service.run_once()
+    assert app.state.governance_service.repository.get_task(created["task_id"])["status"] == "succeeded"
+
+
+def test_business_database_management_routes_removed(app_client):
+    """连接只由启动配置提供，管理员不能再保存第二套业务库凭据。"""
+    _, client, _, _ = app_client
     path = "/api/v1/admin/governance/business-database"
-    assert client.get(path).status_code == 403
-    assert client.get(path, headers=headers()).status_code == 403
     admin = {"X-Setup-Secret": "s" * 32}
-    public = client.get(path, headers=admin).json()["data"]
-    assert public == {"host": "localhost", "port": 3306, "database": "content_safety",
-                      "username": "reader", "password_configured": True}
-    assert "secret" not in json.dumps(public)
-    with app.state.database.connect() as connection:
-        stored = connection.execute("SELECT * FROM llm_business_database_config").fetchone()
-    assert stored["encrypted_password"] != "secret"
-    assert "secret" not in stored["encrypted_password"]
+    assert client.get(path, headers=admin).status_code == 404
+    assert client.put(path, headers=admin, json={}).status_code == 404
+    assert client.post(path + "/test", headers=admin).status_code == 404
+
+
+def test_admin_model_binding_is_persistent_and_requires_setup_secret(app_client):
+    """管理员模型绑定重启后仍可读取，任务不需要另存数据库凭据。"""
+    app, client, model_id, business = app_client
+    admin = {"X-Setup-Secret": "s" * 32}
     assert client.put("/api/v1/admin/governance/models/governance-value", headers=admin,
                       json={"model_id": "missing"}).status_code == 404
-
     restarted = create_app(app.state.test_settings, client_factory=FakeCompletionClient)
     with TestClient(restarted) as other:
-        assert other.get(path, headers=admin).json()["data"] == public
         bindings = other.get("/api/v1/admin/governance/models", headers=admin).json()["data"]
         assert bindings["governance-value"] == model_id
         restarted.state.governance_service.data.connection_factory = business.connect
@@ -886,29 +887,6 @@ def test_existing_sqlite_tokens_import_with_missing_label(tmp_path):
     assert row == {"id": "old", "label": "", "deleted_at": None}
 
 
-def test_app_starts_without_business_database_and_worker_marks_task_failed(tmp_path):
-    """验证未配置业务库时仍可启动建单，worker 失败且不调用模型。"""
-    FakeCompletionClient.calls = []
-    settings = Settings(tmp_path / "db", "s" * 32, Fernet.generate_key())
-    app = create_app(settings, client_factory=FakeCompletionClient)
-    with TestClient(app) as client:
-        manager = app.state.model_manager
-        model = manager.create_model(upstream_model_id="fake", name="fake", description=None,
-                                     base_url="https://example.invalid/v1", api_key="fake-key")
-        admin = {"X-Setup-Secret": "s" * 32}
-        response = client.put("/api/v1/admin/governance/models/governance-value", headers=admin,
-                              json={"model_id": model.id})
-        assert response.status_code == 200
-        app.state.auth_service.create_token("s" * 32, "a" * 32,
-                                            utc_now() + timedelta(days=1), "前端")
-        created = create(client, "governance-value", "general-v1")
-        assert app.state.governance_service.run_once()
-        task = app.state.governance_service.repository.get_task(created["task_id"])
-        assert task["status"] == "failed"
-        assert "业务数据库连接未配置" in task["error_message"]
-        assert FakeCompletionClient.calls == []
-
-
 def test_frontend_options_empty_overviews_and_business_boundary(app_client):
     """无历史时可初始化；方案只显示模型能力，业务目录不由模型服务接管。"""
     app, client, _, business = app_client
@@ -965,103 +943,6 @@ def test_value_samples_add_scope_without_changing_saved_history(app_client):
     assert len(latest) == 1 and "变更后的正文" in latest[0]["text"]
     assert service.repository.get_result(result_id, task["token_hash"], "governance-value") == stored
     assert len(FakeCompletionClient.calls) == calls and business.connections == connections
-
-
-@pytest.mark.parametrize("credentials", [{}, headers(), {"X-Setup-Secret": "wrong"}])
-def test_business_database_test_requires_admin_before_connection(app_client, credentials):
-    app, client, _, business = app_client
-    response = client.post("/api/v1/admin/governance/business-database/test", headers=credentials)
-    assert response.status_code == 403
-    assert response.json()["error_code"] == "invalid_setup_secret"
-    assert business.connections == 0 and business.queries == []
-
-
-def test_business_database_test_without_saved_configuration(app_client):
-    app, client, _, business = app_client
-    with app.state.database.connect() as connection:
-        connection.execute("DELETE FROM llm_business_database_config")
-    response = client.post("/api/v1/admin/governance/business-database/test",
-                           headers={"X-Setup-Secret": "s" * 32})
-    assert response.status_code == 409
-    assert response.json()["error_code"] == "business_database_not_configured"
-    assert business.connections == 0 and FakeCompletionClient.calls == []
-
-
-@pytest.mark.parametrize("failure", [None, "cursor", "SELECT 1", "datasets", "dataset_records"])
-def test_business_database_test_is_read_only_and_closes_connection(app_client, failure):
-    from contextlib import contextmanager
-
-    app, client, _, _ = app_client
-    queries, connections, closed = [], [], []
-    saved = app.state.governance_config.get_business_database()
-
-    def execute(sql):
-        queries.append(sql)
-        if failure and (sql == failure or "FROM " + failure + " " in sql):
-            raise OSError(1142, "private-password-secret private-driver-details")
-
-    @contextmanager
-    def cursor():
-        if failure == "cursor":
-            raise OSError(1142, "private-password-secret private-driver-details")
-        yield SimpleNamespace(execute=execute)
-
-    def connect(**kwargs):
-        connections.append(kwargs)
-        return SimpleNamespace(cursor=cursor, close=lambda: closed.append(True))
-
-    app.state.governance_service.data.connection_factory = connect
-    response = client.post("/api/v1/admin/governance/business-database/test",
-                           headers={"X-Setup-Secret": "s" * 32, "X-Trace-Id": "mysql-test"})
-    body = response.json()
-    assert body["trace_id"] == "mysql-test" and body["timestamp"]
-    if failure is None:
-        assert response.status_code == 200 and body["code"] == 0
-        assert body["data"]["connected"] is True
-        assert body["data"]["checks"] == ["connection", "query", "datasets", "dataset_records"]
-        assert body["data"]["elapsed_ms"] >= 0 and body["data"]["checked_at"]
-        assert queries == ["SELECT 1", "SELECT id, name, version FROM datasets LIMIT 0",
-                           "SELECT id, dataset_id, payload FROM dataset_records LIMIT 0"]
-    else:
-        assert response.status_code == 502
-        assert body["error_code"] == "business_database_query_failed" and body["data"] is None
-    assert len(connections) == 1 and connections[0]["password"] == "secret"
-    assert connections[0]["database"] == "content_safety" and connections[0]["user"] == "reader"
-    assert connections[0]["connect_timeout"] == 10 and connections[0]["read_timeout"] == 30
-    assert closed == [True]
-    assert "secret" not in response.text and "private-driver-details" not in response.text
-    assert app.state.governance_config.get_business_database() == saved
-    assert FakeCompletionClient.calls == []
-
-
-@pytest.mark.parametrize("mysql_code,expected", [(1045, "账号或密码"), (1049, "数据库不存在"),
-                                                 (2003, "主机、端口"), (2013, "连接中断"),
-                                                 (0, "连接失败")])
-def test_business_database_test_connection_errors_hide_private_details(app_client, mysql_code, expected):
-    app, client, _, _ = app_client
-
-    def connect(**kwargs):
-        raise OSError(mysql_code, "private-password-secret private-driver-details")
-
-    app.state.governance_service.data.connection_factory = connect
-    response = client.post("/api/v1/admin/governance/business-database/test",
-                           headers={"X-Setup-Secret": "s" * 32})
-    assert response.status_code == 502
-    assert response.json()["error_code"] == "business_database_connection_failed"
-    assert expected in response.json()["message"]
-    assert "secret" not in response.text and "private-driver-details" not in response.text
-    assert FakeCompletionClient.calls == []
-
-
-def test_business_database_test_invalid_encrypted_password_never_connects(app_client):
-    app, client, _, business = app_client
-    with app.state.database.connect() as connection:
-        connection.execute("UPDATE llm_business_database_config SET encrypted_password='invalid'")
-    response = client.post("/api/v1/admin/governance/business-database/test",
-                           headers={"X-Setup-Secret": "s" * 32})
-    assert response.status_code == 500
-    assert response.json()["error_code"] == "business_database_credentials_invalid"
-    assert business.connections == 0 and FakeCompletionClient.calls == []
 
 
 def test_model_overviews_count_latest_snapshot_once_and_isolate_tokens(app_client):

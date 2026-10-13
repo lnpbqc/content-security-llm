@@ -26,7 +26,7 @@ def main() -> None:
     config = GovernanceConfigRepository(database)
     manager = ModelManager(database, settings.credential_key)
     service = GovernanceService(
-        repository, BusinessGovernanceData(config, manager.cipher,
+        repository, BusinessGovernanceData(database,
                                            mock_samples=settings.governance_mock_samples), manager, config,
     )
     with exclusive_lock(database.data_dir / "governance-worker" / "worker.lock",

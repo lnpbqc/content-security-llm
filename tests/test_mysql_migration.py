@@ -85,6 +85,15 @@ def test_import_roundtrip_is_read_only_and_repeatable(source, mysql_test_databas
         assert connection.execute("SELECT MAX(id) AS last FROM llm_training_script_events").fetchone()["last"] > 487
 
 
+def test_import_ignores_obsolete_business_connection_config(source, mysql_test_database):
+    with sqlite3.connect(source) as connection:
+        connection.execute("CREATE TABLE business_database_config (id INTEGER PRIMARY KEY, host TEXT)")
+        connection.execute("INSERT INTO business_database_config VALUES (1, 'obsolete-host')")
+    report = migrate(source, mysql_test_database)
+    assert "llm_business_database_config" not in report
+    assert sum(table["inserted"] for table in report.values()) == 5
+
+
 def test_import_conflict_rolls_back_earlier_tables(source, mysql_test_database):
     now = utc_now().isoformat()
     with mysql_test_database.connect() as connection:
