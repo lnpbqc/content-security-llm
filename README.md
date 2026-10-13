@@ -87,7 +87,18 @@ uv run python -m scripts.init_mysql
 
 API 与 worker 使用同一配置、MySQL 数据库和任务文件目录；未启动 worker 时，任务会保持待执行状态。治理任务需配置业务数据库、数据版本及治理模型；训练按任务类型准备数据和运行环境。训练源码仅接受可信代码。
 
-神经因果溯源还需安装 `neurotrace-run/requirements.txt` 中的依赖，准备模型清单指定的本地权重和案例材料，并使用兼容的 GPU 环境。API 启动时不会加载这些权重。
+神经因果溯源还需安装 `neurotrace-run/requirements.txt` 中的依赖，将 Qwen3-4B 权重放在 `neurotrace-run/models/Qwen3-4B`，保留 `neurotrace-run/data/manual_review.csv` 及对应 `data/upstream/<case_id>/E1.json`、`E2.json`，GPU 需支持 CUDA 和 BF16。API 启动时不会加载这些权重，溯源 worker 领取任务后才加载。
+
+主项目依赖同步完成后，在项目根目录安装附加依赖并检查（下面是 Linux 命令；Windows 将 Python 路径替换为 `.venv/Scripts/python.exe`）：
+
+```bash
+uv pip install --python .venv/bin/python -r neurotrace-run/requirements.txt
+.venv/bin/python -m service.neural_trace_worker --check
+```
+
+`--check` 只确认模型文件和依赖存在，不验证真实 GPU 运行。附加依赖不在主项目锁文件中，安装后使用虚拟环境 Python 或下方 Linux 脚本启动 API 和各类 worker；后续执行 `uv sync` 后需重新安装附加依赖，避免 `uv run` 自动同步时移除它们。
+
+溯源 worker 默认拒绝已有 GPU 计算进程；Windows WDDM 桌面程序触发该检查时，可先退出旧 worker，再在上述溯源启动命令末尾加 `--allow-busy-gpu`。该选项会传给三个扫描阶段，不保证共享 GPU 的显存足够。HTTP 接口与管理端调用不变，失败任务需要重新提交，详见 [溯源接口与部署说明](神经因果溯源接口与部署.md)。
 
 Linux 可在依赖和配置准备完成后使用管理脚本：
 
@@ -96,10 +107,14 @@ bash start-content-security.sh start                # 启动 API 和治理 worke
 bash start-content-security.sh start training       # 按需启动训练 worker
 bash start-content-security.sh start neural-trace   # 按需启动溯源 worker
 bash start-content-security.sh status
+bash start-content-security.sh log neural-trace     # 跟随溯源日志，Ctrl+C 退出查看
+bash start-content-security.sh restart neural-trace # 只重启溯源 worker
 bash start-content-security.sh stop
 ```
 
-脚本使用 `.venv/bin/python`，日志位于 `logs/`。
+脚本使用 `.venv/bin/python`，日志位于 `logs/`。默认 `start` 只启动 API 和治理，停止全部服务后需按需再次启动训练和溯源。
+
+完整用法：`bash start-content-security.sh {start|stop|restart|status|log|fg} [api|governance|training|neural-trace]`。每条命令最多指定一个服务；省略服务时，`stop/status` 面向全部服务，`restart` 重启当前已运行的服务（没有服务运行则启动 API 和治理），`log/fg` 选择 API。`fg` 用于前台调试，需先停止后台同类服务。脚本不透传 `--allow-busy-gpu` 等 worker 选项，需直接使用虚拟环境 Python 启动。Linux 完整部署步骤见 [Linux 服务部署](Linux服务部署.md)。
 
 ## 测试
 

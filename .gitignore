@@ -31,6 +31,10 @@ db/*.sqlite3*
 *.csv
 docs/
 !/README.md
+!/神经因果溯源接口与部署.md
+!/通用脚本任务接入.md
+!/项目功能说明.md
+!/项目对外接口说明.md
 !/settings.example.json
 
 # 溯源运行必需的依赖及案例输入
