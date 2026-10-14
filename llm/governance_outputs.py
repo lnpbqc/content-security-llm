@@ -102,3 +102,41 @@ class RiskSampleOutput(StrictOutput):
         if self.status == "unassessable" and (self.findings or not self.unassessableReason):
             raise ValueError("unassessable output requires a reason and no findings")
         return self
+
+
+class SemanticWeights(StrictOutput):
+    safe: float = Field(ge=0, le=1, allow_inf_nan=False)
+    neutral: float = Field(ge=0, le=1, allow_inf_nan=False)
+    risk: float = Field(ge=0, le=1, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def check_total(self) -> "SemanticWeights":
+        if abs(self.safe + self.neutral + self.risk - 1) > 0.001:
+            raise ValueError("semantic weights must sum to 1")
+        return self
+
+
+class SemanticEvidence(StrictOutput):
+    quote: str = Field(min_length=1)
+    reason: str = Field(min_length=1)
+
+
+class MultilingualSampleOutput(StrictOutput):
+    sampleId: str = Field(min_length=1)
+    sampleRevisionId: str = Field(min_length=1)
+    status: Literal["assessed", "unassessable"]
+    semanticWeights: Optional[SemanticWeights] = None
+    riskScore: Optional[float] = Field(default=None, ge=0, le=1, allow_inf_nan=False)
+    evidence: List[SemanticEvidence] = Field(default_factory=list, max_length=10)
+    unassessableReason: Optional[str] = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def check_status(self) -> "MultilingualSampleOutput":
+        if self.status == "assessed":
+            if self.semanticWeights is None or self.riskScore is None or self.unassessableReason:
+                raise ValueError("assessed output requires weights and risk score")
+            if self.riskScore >= 0.5 and not self.evidence:
+                raise ValueError("medium or high risk requires source evidence")
+        elif self.semanticWeights is not None or self.riskScore is not None or self.evidence or not self.unassessableReason:
+            raise ValueError("unassessable output requires only a reason")
+        return self

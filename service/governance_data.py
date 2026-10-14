@@ -46,6 +46,10 @@ class BusinessGovernanceData:
 
     def policy(self, kind: str, scheme_id: str) -> Dict[str, Any]:
         """按任务类型和方案版本返回固定评分标准或规则。"""
+        if kind == "ethnic-multilingual" and scheme_id == "multilingual-v1":
+            return {"scheme_id": scheme_id, "name": "多语种语义权重与风险分层 v1.0",
+                    "thresholds": {"low": 0.25, "medium": 0.50, "high": 0.75},
+                    "weights": ["safe", "neutral", "risk"]}
         if kind == "governance-value" and scheme_id in {"general-v1", "general-v2"}:
             return {
                 "scheme_id": scheme_id,
@@ -120,7 +124,8 @@ class BusinessGovernanceData:
             samples.append({
                 "id": sample_id, "dataset_id": dataset_id, "version_id": version_id,
                 "revision_id": "{}:{}".format(version_id, sample_id),
-                "text": self._record_text(payload),
+                "text": self._record_text({key: value for key, value in payload.items()
+                                           if key != "reference_risk_level"}),
                 "language": language if isinstance(language, str) and language else "unknown",
                 "metadata": payload,
             })

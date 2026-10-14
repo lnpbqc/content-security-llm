@@ -27,6 +27,7 @@ class FakeCompletionClient:
     calls = []
     invalid_value = False
     invalid_dimension_name = False
+    semantic_outputs = {}
 
     def __init__(self, **kwargs):
         """提供与 OpenAI 客户端一致的最小调用入口。"""
@@ -52,6 +53,10 @@ class FakeCompletionClient:
                     {"name": "其他" if self.invalid_dimension_name and index == 0 else d["name"],
                      "score": 80, "reason": "有文本证据", "evidence": [data["text"]]}
                     for index, d in enumerate(data["rubric"]["dimensions"])]}
+            elif "semanticScheme" in data:
+                output = {"sampleId": data["sampleId"],
+                          "sampleRevisionId": data["sampleRevisionId"],
+                          **self.semantic_outputs[data["sampleId"]]}
             elif "fieldWhitelist" in data:
                 findings = []
                 if "文化传承" in data["text"]:
@@ -162,6 +167,7 @@ def app_client(tmp_path: Path):
     FakeCompletionClient.calls = []
     FakeCompletionClient.invalid_value = False
     FakeCompletionClient.invalid_dimension_name = False
+    FakeCompletionClient.semantic_outputs = {}
     business = FakeBusinessDatabase()
     settings = Settings(tmp_path / "db", "s" * 32, Fernet.generate_key())
     app = create_app(settings, client_factory=FakeCompletionClient)
@@ -943,6 +949,235 @@ def test_value_samples_add_scope_without_changing_saved_history(app_client):
     assert len(latest) == 1 and "变更后的正文" in latest[0]["text"]
     assert service.repository.get_result(result_id, task["token_hash"], "governance-value") == stored
     assert len(FakeCompletionClient.calls) == calls and business.connections == connections
+
+
+def test_ethnic_multilingual_dataset_task_returns_real_chart_data(app_client):
+    app, client, model_id, business = app_client
+    business.records[3] = [
+        {"id": 1, "payload": {"text": "中文风险片段", "language": "zh", "reference_risk_level": "high"}},
+        {"id": 2, "payload": {"text": "English risk phrase", "language": "en", "reference_risk_level": "high"}},
+        {"id": 3, "payload": {"text": "中文安全片段", "language": "zh"}},
+        {"id": 4, "payload": {"text": "未选择的语种", "language": "ru"}},
+    ]
+    FakeCompletionClient.semantic_outputs = {
+        "1": {"status": "assessed", "semanticWeights": {"safe": .1, "neutral": .2, "risk": .7},
+              "riskScore": .9, "evidence": [{"quote": "中文风险片段", "reason": "明确风险"}]},
+        "2": {"status": "assessed", "semanticWeights": {"safe": .2, "neutral": .3, "risk": .5},
+              "riskScore": .6, "evidence": [{"quote": "English risk phrase", "reason": "风险线索"}]},
+        "3": {"status": "assessed", "semanticWeights": {"safe": .6, "neutral": .3, "risk": .1},
+              "riskScore": .2, "evidence": []},
+    }
+    root = "/api/v1/analysis/ethnic-multilingual"
+    scope = {"dataset_id": 3, "version_id": "v1.0.0", "languages": ["zh", "en"],
+             "analysis_mode": "semantic_weighting", "scheme_id": "multilingual-v1"}
+    created = client.post(root + "/tasks", headers=headers(),
+                          json={"model_id": model_id, "input": scope})
+    assert created.status_code == 200, created.text
+    task = created.json()["data"]
+    assert task["status"] == "pending" and task["result_id"] is None
+    assert app.state.governance_service.run_once()
+    current = client.get(root + "/tasks/" + task["task_id"], headers=headers()).json()["data"]
+    assert current["status"] == "succeeded" and current["result_id"]
+    summary = client.get(root + "/results/" + current["result_id"], headers=headers()).json()["data"]
+    assert summary["target_count"] == summary["valid_count"] == 3
+    assert summary["failed_count"] == summary["unassessable_count"] == 0
+    assert summary["covered_language_count"] == 2
+    assert summary["overall_risk_score"] == .57 and summary["overall_risk_level"] == "medium"
+    assert (summary["data_weight_classification_accuracy"], summary["accuracy_correct_count"],
+            summary["accuracy_test_count"]) == (.5, 1, 2)
+    assert summary["high_risk_semantic_weight"] == 43.3
+    assert 0 < summary["semantic_consistency"] <= 1
+    assert summary["semantic_consistency_delta"] is None
+    assert summary["high_risk_semantic_weight_delta"] is None
+    assert {row["language"] for row in summary["language_distribution"]} == {"zh", "en"}
+    assert all(round(row["safe_weight"] + row["neutral_weight"] + row["risk_weight"], 1) == 100
+               for row in summary["language_distribution"])
+    assert {row["level"]: row["count"] for row in summary["risk_distribution"]} == {
+        "safe": 1, "low": 0, "medium": 1, "high": 1}
+    assert summary["risk_evidence"][0]["quote"] == "中文风险片段"
+    page = client.get(root + "/results/" + current["result_id"] + "/samples", headers=headers(),
+                      params={"page": 1, "page_size": 2}).json()["data"]
+    assert page["total"] == 3 and len(page["items"]) == 2
+    assert page["items"][0]["reference_risk_level"] == "high"
+    assert all("reference_risk_level" not in row["text"] for row in page["items"])
+    params = [("dataset_id", 3), ("version_id", "v1.0.0"), ("languages", "en"),
+              ("languages", "zh"), ("analysis_mode", "semantic_weighting"),
+              ("scheme_id", "multilingual-v1")]
+    assert client.get(root + "/results/latest", headers=headers(), params=params).json()["data"] == summary
+    assert client.get(root + "/results", headers=headers(), params=params).json()["data"] == [summary]
+    assert client.get(root + "/results/" + current["result_id"], headers=headers("b")).status_code == 404
+    assert client.get(root + "/tasks/" + task["task_id"], headers=headers("b")).status_code == 404
+    assert len(FakeCompletionClient.calls) == 3
+    assert all("reference_risk_level" not in json.loads(prompt)["text"]
+               for prompt in FakeCompletionClient.calls)
+
+
+@pytest.mark.parametrize("weights,quote,score", [
+    ({"safe": .4, "neutral": .4, "risk": .4}, "真实原文", .8),
+    ({"safe": .1, "neutral": .2, "risk": .7}, "伪造片段", .8),
+    ({"safe": .1, "neutral": .2, "risk": .7}, "真实原文", 1.1),
+    ({"safe": .1, "neutral": .2, "risk": .7}, " ", .8),
+])
+def test_ethnic_multilingual_rejects_invalid_scope_and_model_output(app_client, weights, quote, score):
+    app, client, model_id, business = app_client
+    root = "/api/v1/analysis/ethnic-multilingual"
+    scope = {"dataset_id": 3, "version_id": "v1.0.0", "languages": ["zh", "zh"],
+             "analysis_mode": "risk_tiering", "scheme_id": "multilingual-v1"}
+    assert client.post(root + "/tasks", headers=headers(),
+                       json={"model_id": model_id, "input": scope}).status_code == 422
+    scope["languages"] = ["not a language"]
+    assert client.post(root + "/tasks", headers=headers(),
+                       json={"model_id": model_id, "input": scope}).status_code == 422
+    scope["languages"] = ["zh"]
+    assert client.post(root + "/tasks", headers=headers(),
+                       json={"model_id": "missing", "input": scope}).status_code == 404
+    business.records[3] = [{"id": 1, "payload": {"text": "真实原文", "language": "zh"}}]
+    FakeCompletionClient.semantic_outputs = {
+        "1": {"status": "assessed", "semanticWeights": weights,
+              "riskScore": score, "evidence": [{"quote": quote, "reason": "错误"}]}}
+    created = client.post(root + "/tasks", headers=headers(),
+                          json={"model_id": model_id, "input": scope})
+    assert created.status_code == 200
+    assert app.state.governance_service.run_once()
+    current = client.get(root + "/tasks/" + created.json()["data"]["task_id"],
+                         headers=headers()).json()["data"]
+    assert current["status"] == "failed" and current["result_id"] is None
+    assert client.get(root + "/results/latest", headers=headers(), params={
+        **scope, "languages": ["zh"]}).json()["data"] is None
+
+
+def test_ethnic_multilingual_unassessable_and_single_language_consistency(app_client):
+    app, client, model_id, business = app_client
+    business.records[3] = [
+        {"id": 1, "payload": {"text": "普通说明", "language": "zh", "reference_risk_level": "low"}},
+        {"id": 2, "payload": {"text": "unreadable", "language": "en", "reference_risk_level": "high"}},
+    ]
+    FakeCompletionClient.semantic_outputs = {
+        "1": {"status": "assessed", "semanticWeights": {"safe": .7, "neutral": .2, "risk": .1},
+              "riskScore": .25, "evidence": []},
+        "2": {"status": "unassessable", "unassessableReason": "内容无法判断"},
+    }
+    root = "/api/v1/analysis/ethnic-multilingual"
+    scope = {"dataset_id": 3, "version_id": "v1.0.0", "languages": ["zh", "en"],
+             "analysis_mode": "risk_tiering", "scheme_id": "multilingual-v1"}
+    task_id = client.post(root + "/tasks", headers=headers(),
+                          json={"model_id": model_id, "input": scope}).json()["data"]["task_id"]
+    assert app.state.governance_service.run_once()
+    result_id = client.get(root + "/tasks/" + task_id, headers=headers()).json()["data"]["result_id"]
+    summary = client.get(root + "/results/" + result_id, headers=headers()).json()["data"]
+    assert (summary["target_count"], summary["valid_count"], summary["unassessable_count"],
+            summary["failed_count"]) == (2, 1, 1, 0)
+    assert summary["covered_language_count"] == 1 and summary["semantic_consistency"] is None
+    assert summary["overall_risk_level"] == "low"
+    assert (summary["data_weight_classification_accuracy"], summary["accuracy_correct_count"],
+            summary["accuracy_test_count"]) == (.5, 1, 2)
+    assert sum(item["count"] for item in summary["risk_distribution"]) == 1
+    page = client.get(root + "/results/" + result_id + "/samples", headers=headers()).json()["data"]
+    assert page["total"] == 2 and page["items"][1]["unassessable_reason"] == "内容无法判断"
+
+
+def test_ethnic_multilingual_deltas_compare_only_same_scope_and_model(app_client):
+    app, client, model_id, business = app_client
+    business.records[3] = [
+        {"id": 1, "payload": {"text": "中文样本", "language": "zh"}},
+        {"id": 2, "payload": {"text": "English sample", "language": "en"}},
+    ]
+    root = "/api/v1/analysis/ethnic-multilingual"
+    scope = {"dataset_id": 3, "version_id": "v1.0.0", "languages": ["zh", "en"],
+             "analysis_mode": "semantic_weighting", "scheme_id": "multilingual-v1"}
+    for risk_weights in ((.1, .1), (.8, .1)):
+        FakeCompletionClient.semantic_outputs = {
+            str(index): {"status": "assessed", "semanticWeights": {
+                "safe": 1 - weight, "neutral": 0, "risk": weight},
+                "riskScore": .2, "evidence": []}
+            for index, weight in enumerate(risk_weights, 1)}
+        created = client.post(root + "/tasks", headers=headers(),
+                              json={"model_id": model_id, "input": scope})
+        assert created.status_code == 200
+        assert app.state.governance_service.run_once()
+    latest = client.get(root + "/results/latest", headers=headers(), params={
+        **scope, "languages": ["zh", "en"]}).json()["data"]
+    assert latest["high_risk_semantic_weight"] == 45.0
+    assert latest["data_weight_classification_accuracy"] is None
+    assert latest["accuracy_test_count"] == 0
+    assert latest["high_risk_semantic_weight_delta"] == 35.0
+    assert latest["semantic_consistency_delta"] < 0
+    assert latest["semantic_consistency"] < 1
+
+
+def test_ethnic_multilingual_accuracy_counts_failed_predictions(app_client):
+    app, client, model_id, business = app_client
+    business.records[3] = [
+        {"id": 1, "payload": {"text": "中文样本", "language": "zh", "reference_risk_level": "safe"}},
+        {"id": 2, "payload": {"text": "English sample", "language": "en", "reference_risk_level": "high"}},
+    ]
+    FakeCompletionClient.semantic_outputs = {
+        "1": {"status": "assessed", "semanticWeights": {"safe": .8, "neutral": .1, "risk": .1},
+              "riskScore": .1, "evidence": []},
+        "2": {"status": "assessed", "semanticWeights": {"safe": .4, "neutral": .4, "risk": .4},
+              "riskScore": .9, "evidence": [{"quote": "English sample", "reason": "风险线索"}]},
+    }
+    root = "/api/v1/analysis/ethnic-multilingual"
+    scope = {"dataset_id": 3, "version_id": "v1.0.0", "languages": ["zh", "en"],
+             "analysis_mode": "risk_tiering", "scheme_id": "multilingual-v1"}
+    task_id = client.post(root + "/tasks", headers=headers(),
+                          json={"model_id": model_id, "input": scope}).json()["data"]["task_id"]
+    assert app.state.governance_service.run_once()
+    result_id = client.get(root + "/tasks/" + task_id, headers=headers()).json()["data"]["result_id"]
+    summary = client.get(root + "/results/" + result_id, headers=headers()).json()["data"]
+    assert summary["failed_count"] == 1
+    assert (summary["data_weight_classification_accuracy"], summary["accuracy_correct_count"],
+            summary["accuracy_test_count"]) == (.5, 1, 2)
+
+
+def test_ethnic_multilingual_accuracy_all_failed_and_invalid_gold_label(app_client):
+    app, client, model_id, business = app_client
+    business.records[3] = [{"id": 1, "payload": {
+        "text": "中文样本", "language": "zh", "reference_risk_level": "high"}}]
+    FakeCompletionClient.semantic_outputs = {
+        "1": {"status": "assessed", "semanticWeights": {"safe": .4, "neutral": .4, "risk": .4},
+              "riskScore": .9, "evidence": [{"quote": "中文样本", "reason": "风险线索"}]}}
+    root = "/api/v1/analysis/ethnic-multilingual"
+    scope = {"dataset_id": 3, "version_id": "v1.0.0", "languages": ["zh"],
+             "analysis_mode": "risk_tiering", "scheme_id": "multilingual-v1"}
+    task_id = client.post(root + "/tasks", headers=headers(),
+                          json={"model_id": model_id, "input": scope}).json()["data"]["task_id"]
+    assert app.state.governance_service.run_once()
+    result_id = client.get(root + "/tasks/" + task_id, headers=headers()).json()["data"]["result_id"]
+    summary = client.get(root + "/results/" + result_id, headers=headers()).json()["data"]
+    assert summary["failed_count"] == 1
+    assert (summary["data_weight_classification_accuracy"], summary["accuracy_correct_count"],
+            summary["accuracy_test_count"]) == (0.0, 0, 1)
+    business.records[3][0]["payload"]["reference_risk_level"] = "critical"
+    task_id = client.post(root + "/tasks", headers=headers(),
+                          json={"model_id": model_id, "input": scope}).json()["data"]["task_id"]
+    assert app.state.governance_service.run_once()
+    assert client.get(root + "/tasks/" + task_id, headers=headers()).json()["data"]["status"] == "failed"
+
+
+def test_ethnic_multilingual_never_publishes_mock_or_wrong_version(app_client):
+    app, client, model_id, business = app_client
+    root = "/api/v1/analysis/ethnic-multilingual"
+    scope = {"dataset_id": 3, "version_id": "v1.0.0", "languages": ["zh"],
+             "analysis_mode": "semantic_weighting", "scheme_id": "multilingual-v1"}
+    business.datasets[3]["version"] = "v2"
+    task_id = client.post(root + "/tasks", headers=headers(),
+                          json={"model_id": model_id, "input": scope}).json()["data"]["task_id"]
+    assert app.state.governance_service.run_once()
+    assert client.get(root + "/tasks/" + task_id, headers=headers()).json()["data"]["status"] == "failed"
+    business.datasets[3]["version"] = "v1.0.0"
+    business.records[3] = [{"id": 1, "payload": {"text": "其他语种", "language": "ru"}}]
+    task_id = client.post(root + "/tasks", headers=headers(),
+                          json={"model_id": model_id, "input": scope}).json()["data"]["task_id"]
+    assert app.state.governance_service.run_once()
+    assert client.get(root + "/tasks/" + task_id, headers=headers()).json()["data"]["status"] == "failed"
+    business.records[3] = []
+    app.state.governance_service.data.mock_samples = True
+    task_id = client.post(root + "/tasks", headers=headers(),
+                          json={"model_id": model_id, "input": scope}).json()["data"]["task_id"]
+    assert app.state.governance_service.run_once()
+    assert client.get(root + "/tasks/" + task_id, headers=headers()).json()["data"]["status"] == "failed"
+    assert FakeCompletionClient.calls == []
 
 
 def test_model_overviews_count_latest_snapshot_once_and_isolate_tokens(app_client):

@@ -118,6 +118,10 @@ bash start-content-security.sh stop
 
 ## 测试
 
+注意数据治理等**需要去单独绑定对应模型是哪个**，具体查看对应接口去绑定，否则可能会报错。
+
+同时，本次使用的xju的服务器配置的模型上游id为`/data/models/模型名`。
+
 测试必须使用独立库，默认 `content_security_llm_test`，仅清理其中的 `llm_` 表。先由数据库管理员创建该库并授予测试账号权限：
 
 ```sql

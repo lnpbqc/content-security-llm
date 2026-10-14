@@ -21,6 +21,7 @@ from db.training import TrainingRepository
 from llm.models import ModelManager
 from router import api_router
 from router.analysis import router as analysis_router
+from router.ethnic_multilingual import router as ethnic_multilingual_router
 from router.neural_trace import router as neural_trace_router
 from router.model_frontend import router as model_frontend_router
 from router.governance import router as governance_router
@@ -85,6 +86,7 @@ def create_app(
     application.include_router(governance_admin_router)
     application.include_router(training_router)
     application.include_router(analysis_router)
+    application.include_router(ethnic_multilingual_router)
     application.include_router(neural_trace_router)
     application.include_router(model_frontend_router)
 

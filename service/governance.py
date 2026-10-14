@@ -8,22 +8,25 @@ from pydantic import BaseModel
 
 from db.governance import GovernanceRepository
 from db.governance_config import GovernanceConfigRepository
-from llm.governance_outputs import AnomalySampleOutput, RiskSampleOutput, ValueSampleOutput
+from llm.governance_outputs import AnomalySampleOutput, MultilingualSampleOutput, RiskSampleOutput, ValueSampleOutput
 from llm.models import InvocationError, ModelManager, ModelNotFoundError
 from service.governance_data import BusinessGovernanceData
+from service.multilingual_semantic import LEVELS, build_snapshot
 from utils.time import utc_now
 
 
-KINDS = {"governance-value", "governance-anomaly", "governance-risk"}
+KINDS = {"governance-value", "governance-anomaly", "governance-risk", "ethnic-multilingual"}
 OUTPUT_TYPES: Dict[str, Type[BaseModel]] = {
     "governance-value": ValueSampleOutput,
     "governance-anomaly": AnomalySampleOutput,
     "governance-risk": RiskSampleOutput,
+    "ethnic-multilingual": MultilingualSampleOutput,
 }
 RESPONSE_TYPES = {
     "governance-value": "governance_value_sample",
     "governance-anomaly": "governance_anomaly_sample",
     "governance-risk": "governance_risk_sample",
+    "ethnic-multilingual": "ethnic_multilingual_sample",
 }
 
 
@@ -58,6 +61,15 @@ class GovernanceService:
         return self.repository.create_task(kind, token_hash, name, scope, model_id,
                                            model.upstream_model_id)
 
+    def create_multilingual_task(self, scope: Dict[str, Any], model_id: str,
+                                 token_hash: str) -> Dict[str, Any]:
+        """场景工作台显式选模，结果仍由同一队列持久化。"""
+        self.data.policy("ethnic-multilingual", scope["scheme_id"])
+        model = self.manager.get_model(model_id)
+        return self.repository.create_task("ethnic-multilingual", token_hash,
+                                           "多语种语义权重与风险分层", scope, model_id,
+                                           model.upstream_model_id)
+
     def run_once(self) -> bool:
         """领取并处理至多一个任务；无待处理任务时返回 False。"""
         task = self.repository.claim()
@@ -73,7 +85,19 @@ class GovernanceService:
         """逐条调用模型并保存检查点，最后发布汇总结果。"""
         scope, kind = task["scope"], task["kind"]
         policy = self.data.policy(kind, scope["scheme_id"])
+        if kind == "ethnic-multilingual":
+            policy = {**policy, "analysis_mode": scope["analysis_mode"]}
         samples = self.data.samples(scope)
+        if kind == "ethnic-multilingual":
+            if any(sample["metadata"].get("is_mock") for sample in samples):
+                raise ValueError("多语种分析只接受真实数据集记录")
+            samples = [sample for sample in samples if sample["language"] in scope["languages"]]
+            if not samples:
+                raise ValueError("所选语种没有可分析的样本")
+            for sample in samples:
+                if ("reference_risk_level" in sample["metadata"] and
+                        sample["metadata"]["reference_risk_level"] not in LEVELS):
+                    raise ValueError("样本 {} 的标准风险档位无效".format(sample["id"]))
         outcomes = self.repository.sample_outcomes(task["id"])
         for sample in samples:
             if sample["id"] in outcomes:
@@ -93,7 +117,9 @@ class GovernanceService:
             except InvocationError as exc:
                 self.repository.save_sample(task["id"], sample["id"], None, exc.code)
         outcomes = self.repository.sample_outcomes(task["id"])
-        if samples and all(outcomes[s["id"]]["status"] == "error" for s in samples):
+        if (samples and all(outcomes[s["id"]]["status"] == "error" for s in samples) and
+                not (kind == "ethnic-multilingual" and
+                     any("reference_risk_level" in s["metadata"] for s in samples))):
             self.repository.fail(task["id"], "所有样本的模型调用或业务校验均失败")
             return
         result_id = str(uuid4())
@@ -105,6 +131,14 @@ class GovernanceService:
 
     def _model_input(self, kind: str, sample: Dict[str, Any], policy: Dict[str, Any]) -> Dict[str, Any]:
         """按任务类型组装单条模型输入；风险文本先遮蔽。"""
+        if kind == "ethnic-multilingual":
+            return {"sampleId": sample["id"], "sampleRevisionId": sample["revision_id"],
+                    "text": self.data.risk_text(sample["text"]), "language": sample["language"],
+                    "semanticScheme": policy,
+                    "instructions": ("仅根据正文估计安全、中性、风险语义权重及风险分；三权重合计为 1。"
+                                     "中高风险必须引用正文连续片段；无法评估时说明原因，不按语种或民族身份定风险。"
+                                     + ("重点解释语义权重。" if policy["analysis_mode"] == "semantic_weighting"
+                                        else "重点解释风险分层依据。"))}
         if kind == "governance-value":
             return {"sample_id": sample["id"], "text": sample["text"],
                     "language": sample["language"], "rubric": {
@@ -147,6 +181,12 @@ class GovernanceService:
             return
         if output["sampleId"] != sample["id"] or output["sampleRevisionId"] != sample["revision_id"]:
             raise ValueError("样本或修订 ID 不一致")
+        if kind == "ethnic-multilingual":
+            masked = self.data.risk_text(sample["text"])
+            if any(not item["quote"].strip() or not item["reason"].strip() or
+                   item["quote"] not in masked for item in output["evidence"]):
+                raise ValueError("语义风险引用或理由无效")
+            return
         if kind == "governance-anomaly":
             rules = set(policy["model_applicable_rule_ids"])
             fields = set(policy["field_whitelist"])
@@ -182,6 +222,12 @@ class GovernanceService:
             return self._value_snapshot(task, policy, samples, outcomes, result_id)
         if kind == "governance-anomaly":
             return self._anomaly_snapshot(task, policy, samples, outcomes, result_id)
+        if kind == "ethnic-multilingual":
+            earlier = self.repository.list_results(kind, task["token_hash"], task["scope"])
+            previous = next((item["summary"] for item in earlier
+                             if item["summary"].get("model_id") == task["model_id"]), None)
+            base = {**self._base_summary(task, result_id), "model_id": task["model_id"]}
+            return build_snapshot(base, policy, samples, outcomes, self.data.risk_text, previous)
         return self._risk_snapshot(task, policy, samples, outcomes, result_id)
 
     def _base_summary(self, task: Dict[str, Any], result_id: str) -> Dict[str, Any]:
