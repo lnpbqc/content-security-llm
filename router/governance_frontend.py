@@ -13,10 +13,11 @@ router = APIRouter(prefix="/api/v1", tags=["governance-frontend"],
                    dependencies=[Depends(require_token)])
 
 
-def _latest_versions(service: GovernanceService, kind: str, token_hash: str):
+def _latest_versions(service: GovernanceService, kind: str, token_hash: str, summary_only: bool = False):
     """同一数据集版本只纳入最近一次保存结果，不累加重复分析。"""
     latest = {}
-    for result in service.repository.list_results(kind, token_hash):
+    read = service.repository.list_result_summaries if summary_only else service.repository.list_results
+    for result in read(kind, token_hash):
         scope = result["scope"]
         latest.setdefault((scope["dataset_id"], scope["version_id"]), result)
     return list(latest.values())
@@ -88,7 +89,7 @@ def anomaly_overview(request: Request, kind: Literal["governance-anomaly"] = Que
                      service: GovernanceService = Depends(get_service),
                      token_hash: str = Depends(require_token)):
     """异常概览只统计已保存的检测结果，不虚构人工复核或修复数量。"""
-    results = _latest_versions(service, kind, token_hash)
+    results = _latest_versions(service, kind, token_hash, summary_only=True)
     summaries = [result["summary"] for result in results]
     values = [sum(row["valid_count"] + row["unavailable_count"] + row["failed_count"] for row in summaries),
               sum(row["anomaly_count"] for row in summaries), 0, 0]
@@ -105,7 +106,7 @@ def anomaly_overview(request: Request, kind: Literal["governance-anomaly"] = Que
 def risk_overview(request: Request, service: GovernanceService = Depends(get_service),
                   token_hash: str = Depends(require_token)):
     """风险概览只使用当前令牌的结果快照。"""
-    results = _latest_versions(service, "governance-risk", token_hash)
+    results = _latest_versions(service, "governance-risk", token_hash, summary_only=True)
     summaries = [result["summary"] for result in results]
     labels = ["有效检测语料", "风险候选", "高风险样本", "建议人工复核"]
     fields = ["valid_count", "risk_count", "high_count", "pending_count"]

@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from router.dependencies import require_token
+from schemas.governance import GovernanceResponse, RiskWeightAccuracy
 from service.governance import GovernanceService, ModelNotConfiguredError
 from utils.time import utc_now
 
@@ -103,9 +104,11 @@ def _get_task(request: Request, task_id: str, kind: str,
     return success(request, _task_public(task, service))
 
 
-def _get_result(service: GovernanceService, result_id: str, kind: str, token_hash: str):
+def _get_result(service: GovernanceService, result_id: str, kind: str, token_hash: str,
+                summary_only: bool = False):
     """只读取当前令牌拥有的结果，缺失时返回 404。"""
-    result = service.repository.get_result(result_id, token_hash, kind)
+    read = service.repository.get_result_summary if summary_only else service.repository.get_result
+    result = read(result_id, token_hash, kind)
     if result is None:
         raise HTTPException(404, detail={"code": "result_not_found", "message": "结果不存在"})
     return result
@@ -198,13 +201,13 @@ def _summary_public(result, kind):
 
 def _latest(request, kind, scope, service, token_hash):
     """读取完整范围内最新的已完成结果；没有则返回 null。"""
-    results = service.repository.list_results(kind, token_hash, scope)
+    results = service.repository.list_result_summaries(kind, token_hash, scope, limit=1)
     return success(request, _summary_public(results[0], kind) if results else None)
 
 
 def _history(request, kind, scope, service, token_hash):
     """读取完整范围内的已完成结果历史。"""
-    results = service.repository.list_results(kind, token_hash, scope)
+    results = service.repository.list_result_summaries(kind, token_hash, scope)
     return success(request, [_summary_public(result, kind) for result in results])
 
 
@@ -221,7 +224,7 @@ def value_result(request: Request, result_id: str,
                  service: GovernanceService = Depends(get_service),
                  token_hash: str = Depends(require_token)):
     """只读查询指定价值分析结果的汇总。"""
-    return success(request, _get_result(service, result_id, "governance-value", token_hash)["summary"])
+    return success(request, _get_result(service, result_id, "governance-value", token_hash, summary_only=True)["summary"])
 
 
 @router.get("/data-governance/value-results/{result_id}/samples", dependencies=[value_kind])
@@ -274,7 +277,7 @@ def anomaly_result(request: Request, result_id: str,
                    service: GovernanceService = Depends(get_service),
                    token_hash: str = Depends(require_token)):
     """只读查询指定异常治理结果的汇总。"""
-    return success(request, _get_result(service, result_id, "governance-anomaly", token_hash)["summary"])
+    return success(request, _get_result(service, result_id, "governance-anomaly", token_hash, summary_only=True)["summary"])
 
 
 @router.get("/data-governance/anomaly-results/{result_id}/samples", dependencies=[anomaly_kind])
@@ -311,6 +314,30 @@ def latest_risk(request: Request, scope: Dict[str, Any] = Depends(query_scope),
     return _latest(request, "governance-risk", scope, service, token_hash)
 
 
+def _weight_accuracy(correct: int, total: int) -> Dict[str, Any]:
+    return {"accuracyPercent": round(correct / total * 100, 1) if total else None,
+            "correctCount": correct, "totalCount": total}
+
+
+@router.get("/data-governance/risk-weight-accuracy/overview", dependencies=[risk_kind],
+            response_model=GovernanceResponse[RiskWeightAccuracy], response_model_exclude_unset=True)
+def risk_weight_accuracy_overview(request: Request,
+                                  service: GovernanceService = Depends(get_service),
+                                  token_hash: str = Depends(require_token)):
+    """每个数据集版本和方案只汇总最新的全语种风险检测。"""
+    seen = set()
+    correct = total = 0
+    for result in service.repository.list_result_summaries("governance-risk", token_hash):
+        scope = result["scope"]
+        key = (scope["dataset_id"], scope["version_id"], scope["scheme_id"])
+        if scope["language"] != "all" or key in seen:
+            continue
+        seen.add(key)
+        correct += result["summary"].get("accuracy_correct_count", 0)
+        total += result["summary"].get("accuracy_test_count", 0)
+    return success(request, _weight_accuracy(correct, total))
+
+
 @router.get("/data-governance/risk-results", dependencies=[risk_kind])
 def risk_history(request: Request, scope: Dict[str, Any] = Depends(query_scope),
                  service: GovernanceService = Depends(get_service),
@@ -324,8 +351,19 @@ def risk_result(request: Request, result_id: str,
                 service: GovernanceService = Depends(get_service),
                 token_hash: str = Depends(require_token)):
     """只读查询指定风险分级结果的汇总。"""
-    result = _get_result(service, result_id, "governance-risk", token_hash)
+    result = _get_result(service, result_id, "governance-risk", token_hash, summary_only=True)
     return success(request, _summary_public(result, "governance-risk"))
+
+
+@router.get("/data-governance/risk-results/{result_id}/weight-accuracy", dependencies=[risk_kind],
+            response_model=GovernanceResponse[RiskWeightAccuracy], response_model_exclude_unset=True)
+def risk_result_weight_accuracy(request: Request, result_id: str,
+                                service: GovernanceService = Depends(get_service),
+                                token_hash: str = Depends(require_token)):
+    """返回指定风险检测批次保存的标准档位判别准确率。"""
+    summary = _get_result(service, result_id, "governance-risk", token_hash, summary_only=True)["summary"]
+    return success(request, _weight_accuracy(summary.get("accuracy_correct_count", 0),
+                                             summary.get("accuracy_test_count", 0)))
 
 
 @router.get("/data-governance/risk-results/{result_id}/samples", dependencies=[risk_kind])

@@ -2,7 +2,7 @@
 
 from typing import Annotated, Literal, Optional, Union
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator, model_validator
 
 Text = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 InputText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=50000)]
@@ -23,6 +23,11 @@ class Material(StrictModel):
     content: InputText
     title: Optional[Identifier] = None
     time: Optional[Identifier] = None  # 原材料时间原样保留；不推断时区、日期或趋势。
+
+    @field_validator("title", "time", mode="before")
+    @classmethod
+    def blank_optional_fields(cls, value):
+        return None if isinstance(value, str) and not value.strip() else value
 
 
 class ScenarioRequest(StrictModel):

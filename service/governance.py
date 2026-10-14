@@ -11,11 +11,12 @@ from db.governance_config import GovernanceConfigRepository
 from llm.governance_outputs import AnomalySampleOutput, MultilingualSampleOutput, RiskSampleOutput, ValueSampleOutput
 from llm.models import InvocationError, ModelManager, ModelNotFoundError
 from service.governance_data import BusinessGovernanceData
-from service.multilingual_semantic import LEVELS, build_snapshot
+from service.multilingual_semantic import build_snapshot
 from utils.time import utc_now
 
 
 KINDS = {"governance-value", "governance-anomaly", "governance-risk", "ethnic-multilingual"}
+REFERENCE_RISK_LEVELS = ("safe", "low", "medium", "high")
 OUTPUT_TYPES: Dict[str, Type[BaseModel]] = {
     "governance-value": ValueSampleOutput,
     "governance-anomaly": AnomalySampleOutput,
@@ -94,9 +95,10 @@ class GovernanceService:
             samples = [sample for sample in samples if sample["language"] in scope["languages"]]
             if not samples:
                 raise ValueError("所选语种没有可分析的样本")
+        if kind == "governance-risk":
             for sample in samples:
                 if ("reference_risk_level" in sample["metadata"] and
-                        sample["metadata"]["reference_risk_level"] not in LEVELS):
+                        sample["metadata"]["reference_risk_level"] not in REFERENCE_RISK_LEVELS):
                     raise ValueError("样本 {} 的标准风险档位无效".format(sample["id"]))
         outcomes = self.repository.sample_outcomes(task["id"])
         for sample in samples:
@@ -118,7 +120,7 @@ class GovernanceService:
                 self.repository.save_sample(task["id"], sample["id"], None, exc.code)
         outcomes = self.repository.sample_outcomes(task["id"])
         if (samples and all(outcomes[s["id"]]["status"] == "error" for s in samples) and
-                not (kind == "ethnic-multilingual" and
+                not (kind == "governance-risk" and
                      any("reference_risk_level" in s["metadata"] for s in samples))):
             self.repository.fail(task["id"], "所有样本的模型调用或业务校验均失败")
             return
@@ -223,7 +225,7 @@ class GovernanceService:
         if kind == "governance-anomaly":
             return self._anomaly_snapshot(task, policy, samples, outcomes, result_id)
         if kind == "ethnic-multilingual":
-            earlier = self.repository.list_results(kind, task["token_hash"], task["scope"])
+            earlier = self.repository.list_result_summaries(kind, task["token_hash"], task["scope"])
             previous = next((item["summary"] for item in earlier
                              if item["summary"].get("model_id") == task["model_id"]), None)
             base = {**self._base_summary(task, result_id), "model_id": task["model_id"]}
@@ -326,6 +328,7 @@ class GovernanceService:
     def _risk_snapshot(self, task, policy, samples, outcomes, result_id):
         """汇总风险等级和数量，仅保存遮蔽后的正文。"""
         rows = []
+        predicted_levels = {}
         failed = unassessable = 0
         order = {"HIGH": 0, "MEDIUM": 1, "LOW": 2, "NOTICE": 3}
         for sample in samples:
@@ -339,6 +342,9 @@ class GovernanceService:
             findings = output["findings"]
             level = min((finding["suggestedLevel"] for finding in findings),
                         key=order.get, default="NOTICE")
+            if output["status"] == "assessed":
+                predicted_levels[sample["id"]] = ({"LOW": "low", "MEDIUM": "medium", "HIGH": "high"}.get(level)
+                                                  if findings else "safe")
             primary = min(findings, key=lambda finding: order[finding["suggestedLevel"]]) if findings else None
             rows.append({"id": sample["id"], "dataset_id": sample["dataset_id"],
                          "version_id": sample["version_id"], "revision_id": sample["revision_id"],
@@ -360,10 +366,14 @@ class GovernanceService:
                            "color": definition["color"], "count": count,
                            "percent": round(count / len(risk_rows) * 100, 1) if risk_rows else 0})
         summary = self._base_summary(task, result_id)
+        labeled = [sample for sample in samples if "reference_risk_level" in sample["metadata"]]
+        correct = sum(predicted_levels.get(sample["id"]) == sample["metadata"]["reference_risk_level"]
+                      for sample in labeled)
         summary.update({"status": "已完成", "valid_count": valid, "risk_count": len(risk_rows),
                         "ratio": round(len(risk_rows) / valid * 100, 1) if valid else 0,
                         "high_count": sum(row["maximum_suggested_level"] == "HIGH" for row in risk_rows),
                         "pending_count": sum(row["status"] == "待复核" for row in rows),
                         "reviewed_count": 0, "unassessable_count": unassessable,
-                        "failed_count": failed, "levels": levels, "actions": []})
+                        "failed_count": failed, "levels": levels, "actions": [],
+                        "accuracy_correct_count": correct, "accuracy_test_count": len(labeled)})
         return summary, rows

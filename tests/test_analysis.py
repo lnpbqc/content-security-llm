@@ -158,6 +158,39 @@ def test_invalid_scene_requests_do_not_call_provider(api, change):
     assert not requests and history(client)["total"] == 0
 
 
+def test_optional_material_fields_accept_blank_values(api):
+    client, model, _, _ = api
+    payload = scenario(model)
+    payload["materials"][0].update(title="", time=" \t\n ")
+    response = post(client, "scenarios", payload)
+    assert response.status_code == 200, response.text
+    material = response.json()["data"]["input"]["materials"][0]
+    assert material["title"] is None and material["time"] is None
+
+
+def test_scenario_total_limit_and_validation_error_details(api):
+    client, model, _, requests = api
+    payload = scenario(model)
+    payload["content"] = "x" * 50000
+    payload["materials"][0]["content"] = TEXT + "x" * (50000 - len(TEXT))
+    assert post(client, "scenarios", payload).status_code == 200
+    payload["materials"].append({"id": "m2", "content": "x"})
+    response = post(client, "scenarios", payload)
+    assert response.status_code == 422
+    body = response.json()
+    assert body["code"] == 422 and body["data"] is None and body["error_code"] == "validation_error"
+    assert body["validation_errors"][0]["loc"] == ["body"]
+    assert "100000" in body["validation_errors"][0]["message"]
+    payload = scenario(model)
+    payload["language"] = "private input must not be echoed"
+    response = post(client, "scenarios", payload)
+    issue = response.json()["validation_errors"][0]
+    assert issue["loc"] == ["body", "language"] and issue["type"] == "string_pattern_mismatch"
+    assert set(issue) == {"loc", "type", "message"}
+    assert payload["language"] not in response.text
+    assert len(requests) == 1 and history(client)["total"] == 1
+
+
 @pytest.mark.parametrize("where", ["common", "details"])
 @pytest.mark.parametrize("bad", ["source", "quote"])
 def test_all_quote_locations_are_validated(api, where, bad):

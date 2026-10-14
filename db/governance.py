@@ -8,6 +8,9 @@ from db.database import Database
 from utils.time import utc_now
 
 
+SUMMARY_COLUMNS = "id, task_id, kind, token_hash, scope_json, summary_json, created_at"
+
+
 def scope_json(scope: Dict[str, Any]) -> str:
     """把四元组范围转成稳定字符串，供精确匹配查询。"""
     return json.dumps(scope, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -29,7 +32,8 @@ def _result(row: Any) -> Optional[Dict[str, Any]]:
     result = dict(row)
     result["scope"] = json.loads(result.pop("scope_json"))
     result["summary"] = json.loads(result.pop("summary_json"))
-    result["samples"] = json.loads(result.pop("samples_json"))
+    if "samples_json" in result:
+        result["samples"] = json.loads(result.pop("samples_json"))
     return result
 
 
@@ -168,6 +172,33 @@ class GovernanceRepository:
                 (result_id, token_hash, kind),
             ).fetchone()
         return _result(row)
+
+    def get_result_summary(self, result_id: str, token_hash: str,
+                           kind: str) -> Optional[Dict[str, Any]]:
+        """汇总查询不读取或解析逐样本 JSON，权限条件与完整结果一致。"""
+        with self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT {} FROM llm_governance_results WHERE id = %s AND token_hash = %s AND kind = %s".format(SUMMARY_COLUMNS),
+                (result_id, token_hash, kind),
+            ).fetchone()
+        return _result(row)
+
+    def list_result_summaries(self, kind: str, token_hash: str,
+                              scope: Optional[Dict[str, Any]] = None,
+                              limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        """只读取汇总；最新查询可在数据库中限制为一项。"""
+        query = "SELECT {} FROM llm_governance_results WHERE token_hash = %s AND kind = %s".format(SUMMARY_COLUMNS)
+        params = [token_hash, kind]
+        if scope is not None:
+            query += " AND scope_json = %s"
+            params.append(scope_json(scope))
+        query += " ORDER BY created_at DESC, id DESC"
+        if limit is not None:
+            query += " LIMIT %s"
+            params.append(limit)
+        with self.database.connect() as connection:
+            rows = connection.execute(query, params).fetchall()
+        return [_result(row) for row in rows]
 
     def list_results(self, kind: str, token_hash: str,
                      scope: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:

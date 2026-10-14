@@ -69,7 +69,7 @@ def stage_outputs():
     }
 
 
-def fake_gpu(monkeypatch, tmp_path, fail_stage=None, invalid_stage=None, allow_busy_gpu=False):
+def fake_gpu(monkeypatch, tmp_path, fail_stage=None, invalid_stage=None, allow_busy_gpu=True):
     model = tmp_path / "model"
     model.mkdir()
     (model / "config.json").write_text("{}", encoding="utf-8")
@@ -243,26 +243,41 @@ def test_queued_input_is_immutable(api, tmp_path):
 
 
 def test_busy_gpu_does_not_start_model(api, monkeypatch, tmp_path):
-    seen = fake_gpu(monkeypatch, tmp_path)
+    seen = fake_gpu(monkeypatch, tmp_path, allow_busy_gpu=False)
     monkeypatch.setattr(worker_module.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout="12345\n"))
     task_id = submit(api)
-    worker_module.NeuralTraceWorker(api.app.state.neural_trace_service.repository).run_once()
+    worker_module.NeuralTraceWorker(api.app.state.neural_trace_service.repository, allow_busy_gpu=False).run_once()
     task = api.get(BASE + "/tasks/" + task_id, headers=AUTH).json()["data"]
     assert task["status"] == "failed" and task["stage"] == "preflight" and "GPU 已有" in task["error_message"]
     assert seen == []
 
 
-def test_allow_busy_gpu_cli_runs_pipeline(api, monkeypatch, tmp_path):
+@pytest.mark.parametrize("option", [[], ["--allow-busy-gpu"]], ids=["default", "explicit"])
+def test_allow_busy_gpu_cli_runs_pipeline(api, monkeypatch, tmp_path, option):
     seen = fake_gpu(monkeypatch, tmp_path, allow_busy_gpu=True)
     monkeypatch.setattr(worker_module.subprocess, "run", lambda *a, **k: pytest.fail("显式允许时不应检查进程占用"))
     monkeypatch.setattr(worker_module.Settings, "load", lambda: None)
     monkeypatch.setattr(worker_module, "Database", lambda settings: api.app.state.database)
     monkeypatch.setattr(worker_module.signal, "signal", lambda *a: None)
-    monkeypatch.setattr(sys, "argv", ["neural_trace_worker", "--once", "--allow-busy-gpu"])
+    monkeypatch.setattr(sys, "argv", ["neural_trace_worker", "--once", *option])
     task_id = submit(api)
     worker_module.main()
     task = api.get(BASE + "/tasks/" + task_id, headers=AUTH).json()["data"]
     assert task["status"] == "succeeded" and seen == list(STAGES)
+
+
+def test_no_allow_busy_gpu_cli_checks_occupancy(api, monkeypatch, tmp_path):
+    seen = fake_gpu(monkeypatch, tmp_path, allow_busy_gpu=False)
+    monkeypatch.setattr(worker_module.subprocess, "run", lambda *a, **k: SimpleNamespace(stdout="12345\n"))
+    monkeypatch.setattr(worker_module.Settings, "load", lambda: None)
+    monkeypatch.setattr(worker_module, "Database", lambda settings: api.app.state.database)
+    monkeypatch.setattr(worker_module.signal, "signal", lambda *a: None)
+    monkeypatch.setattr(sys, "argv", ["neural_trace_worker", "--once", "--no-allow-busy-gpu"])
+    task_id = submit(api)
+    worker_module.main()
+    task = api.get(BASE + "/tasks/" + task_id, headers=AUTH).json()["data"]
+    assert task["status"] == "failed" and task["stage"] == "preflight" and "GPU 已有" in task["error_message"]
+    assert seen == []
 
 
 def test_interrupted_worker_marks_task_failed(api, monkeypatch, tmp_path):

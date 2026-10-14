@@ -30,16 +30,16 @@ test -f settings.local.json || cp settings.example.json settings.local.json
 
 编辑 `settings.local.json`：
 
-| 配置项 | 填写内容 |
-| --- | --- |
-| `mysql_host`、`mysql_port` | 应用可访问的 MySQL 地址，服务器端口通常为 `3306` |
-| `mysql_user`、`mysql_password` | 服务器账号 `content_user` 和实际密码 |
-| `mysql_database` | `content_safety`，需提前创建并授予本项目表的建表及读写权限 |
-| `setup_secret` | 至少 32 字符的随机管理员密钥 |
-| `credential_key` | 有效的 Fernet 密钥 |
-| `data_dir` | `db`，保存任务文件、训练产物和锁文件 |
-| `business_api_base_url` | 应用可访问的业务后端地址，包含 `/api/v1` |
-| `governance_mock_samples` | `false`，使用真实业务数据 |
+| 配置项                         | 填写内容                                                   |
+| ------------------------------ | ---------------------------------------------------------- |
+| `mysql_host`、`mysql_port`     | 应用可访问的 MySQL 地址，服务器端口通常为 `3306`           |
+| `mysql_user`、`mysql_password` | 服务器账号 `content_user` 和实际密码                       |
+| `mysql_database`               | `content_safety`，需提前创建并授予本项目表的建表及读写权限 |
+| `setup_secret`                 | 至少 32 字符的随机管理员密钥                               |
+| `credential_key`               | 有效的 Fernet 密钥                                         |
+| `data_dir`                     | `db`，保存任务文件、训练产物和锁文件                       |
+| `business_api_base_url`        | 应用可访问的业务后端地址，包含 `/api/v1`                   |
+| `governance_mock_samples`      | `false`，使用真实业务数据                                  |
 
 首次生成两项密钥，分别填入 `setup_secret`、`credential_key`；后续保持配置中的密钥稳定：
 
@@ -139,10 +139,16 @@ OMP_NUM_THREADS=1 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
 
 ## 5. 启动服务
 
-默认启动 API 和治理 worker：
+默认启动 API 和治理／多语种 worker：
 
 ```bash
 bash start-content-security.sh start
+```
+
+治理代码更新后重启 worker：
+
+```bash
+bash start-content-security.sh restart governance
 ```
 
 按需启用训练：
@@ -164,7 +170,7 @@ bash start-content-security.sh log neural-trace
 - 默认 `start` 不启动训练或溯源；每次停止全部服务后，需按需再次单独启动。
 - 只需要 API 和溯源时，先执行 `bash start-content-security.sh start api`，再单独启动 `neural-trace`。
 - 治理还需在管理端配置业务数据库、数据版本及治理模型；未启动对应 worker 时，任务保持 `pending`。
-- 溯源默认拒绝已有 GPU 计算进程，忙碌时将领取的任务记为失败；训练和溯源应错开运行。
+- 溯源默认 `allow_busy_gpu=True`，允许 GPU 已有进程时继续；使用 `--no-allow-busy-gpu` 启用占用检查，忙碌时将领取的任务记为失败。
 
 脚本使用 `.venv/bin/python`，API 监听 `0.0.0.0:8001`，日志与 PID 保存在 `logs/`。API 和全部 worker 使用同一配置及任务文件目录，每类 worker 运行一个实例。
 
@@ -225,7 +231,7 @@ curl --fail -H "Authorization: Bearer $LLM_TOKEN" \
 {
   "name": "Linux CIFAR-100 验收",
   "script_id": "cifar100-cnn",
-  "inputs": {"download": true},
+  "inputs": { "download": true },
   "parameters": {
     "epochs": 3,
     "batch_size": 128,
@@ -261,7 +267,7 @@ bash start-content-security.sh stop            # 停止全部服务
 bash start-content-security.sh restart         # 重启当前已运行的服务
 ```
 
-没有服务运行时，`restart` 默认启动 API 和治理。脚本不透传 `--check`、`--once` 或 `--allow-busy-gpu`。使用溯源 worker 选项时，先停止后台同类 worker，再在前台执行下面其中一条：
+没有服务运行时，`restart` 默认启动 API 和治理。脚本不透传 `--check`、`--once`、`--allow-busy-gpu` 或 `--no-allow-busy-gpu`。使用溯源 worker 选项时，先停止后台同类 worker，再在前台执行下面其中一条：
 
 ```bash
 bash start-content-security.sh stop neural-trace
@@ -269,11 +275,11 @@ bash start-content-security.sh stop neural-trace
 # 最多领取并执行一个任务后退出；空队列时直接退出
 .venv/bin/python -m service.neural_trace_worker --once
 
-# 确认允许共享 GPU 后，跳过占用拦截并常驻运行
-.venv/bin/python -m service.neural_trace_worker --allow-busy-gpu
+# 启用 GPU 占用检查并常驻运行
+.venv/bin/python -m service.neural_trace_worker --no-allow-busy-gpu
 ```
 
-`--allow-busy-gpu` 同时传给层扫描、激活差异和组件扫描，不保证共享显存足够。手动启动的 worker 不由管理脚本记录 PID，用原终端的 `Ctrl+C` 停止。溯源按同一 `data_dir` 下的文件锁限制单实例，切换启动选项需先停止旧 worker。
+默认允许共享 GPU，并将 `--allow-busy-gpu` 传给层扫描、激活差异和组件扫描，不保证共享显存足够；显式传入 `--no-allow-busy-gpu` 时启用占用检查，扫描阶段也不再传入允许占用参数。手动启动的 worker 不由管理脚本记录 PID，用原终端的 `Ctrl+C` 停止。溯源按同一 `data_dir` 下的文件锁限制单实例，切换启动选项需先停止旧 worker。
 
 溯源 worker 重启会将遗留 `running` 任务标记失败，保留产物，不自动重跑；正常停止会终止当前实验子进程。强制终止后用 `nvidia-smi` 检查是否仍有遗留实验进程。训练 worker 重启也不会自动续训，更新服务前先完成或取消训练任务。
 

@@ -116,6 +116,8 @@ def create_app(
             "code": 422, "message": "请求参数无效", "data": None, "error_code": "validation_error",
             "trace_id": request.headers.get("X-Trace-Id") or str(uuid4()),
             "timestamp": utc_now().isoformat(),
+            "validation_errors": [{"loc": list(error["loc"]), "type": error["type"],
+                                   "message": error["msg"]} for error in exc.errors()],
         })
 
     @application.get("/")

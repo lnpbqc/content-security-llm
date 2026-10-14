@@ -40,9 +40,7 @@ def build_snapshot(base, policy, samples, outcomes, mask_text, previous=None):
                "text": mask_text(sample["text"]), "language": sample["language"],
                "status": output["status"], "semantic_weights": output["semanticWeights"],
                "risk_score": output["riskScore"], "risk_level": "unknown",
-               "evidence": output["evidence"],
-               **({"reference_risk_level": sample["metadata"]["reference_risk_level"]}
-                  if "reference_risk_level" in sample["metadata"] else {})}
+               "evidence": output["evidence"]}
         if output["status"] == "assessed":
             row["risk_level"] = risk_level(output["riskScore"], policy["thresholds"])
         else:
@@ -83,17 +81,10 @@ def build_snapshot(base, policy, samples, outcomes, mask_text, previous=None):
                  "risk_score": round(row["risk_score"], 2), "risk_level": row["risk_level"]}
                 for row in valid for item in row["evidence"]]
     evidence.sort(key=lambda item: (-item["semantic_weight"], -item["risk_score"], item["sample_id"]))
-    labeled = [sample for sample in samples if "reference_risk_level" in sample["metadata"]]
-    predicted = {row["id"]: row["risk_level"] for row in rows}
-    correct = sum(predicted.get(sample["id"]) == sample["metadata"]["reference_risk_level"]
-                  for sample in labeled)
     summary = {**base, "data_source": "business_dataset", "scheme_name": policy["name"],
                "thresholds": policy["thresholds"],
                "target_count": len(samples), "valid_count": len(valid),
                "unassessable_count": unassessable, "failed_count": failed,
-               "accuracy_correct_count": correct, "accuracy_test_count": len(labeled),
-               "data_weight_classification_accuracy": (round(correct / len(labeled), 4)
-                                                       if labeled else None),
                "overall_risk_score": round(mean_score, 2) if mean_score is not None else None,
                "overall_risk_level": (risk_level(mean_score, policy["thresholds"])
                                       if mean_score is not None else "unknown"),

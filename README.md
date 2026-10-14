@@ -4,13 +4,13 @@
 
 ## 主要功能
 
-| 功能 | 说明 |
-| --- | --- |
-| 模型与令牌管理 | 管理模型配置、访问令牌及调用记录，加密保存上游凭据。 |
-| 内容分析 | 支持结构化问答、风险判断、价值评分、生成治理和证据审计，覆盖六类业务场景。 |
-| 数据治理 | 执行数据价值评估、标签异常检测和风险识别，保存结果及处理建议。 |
-| 模型训练 | 支持可信 PyTorch 源码和已注册脚本任务，提供进度、日志、取消及产物下载。 |
-| 神经因果溯源 | 基于本地模型和案例材料执行干预分析，输出层级评分及关键组件结果。 |
+| 功能           | 说明                                                                       |
+| -------------- | -------------------------------------------------------------------------- |
+| 模型与令牌管理 | 管理模型配置、访问令牌及调用记录，加密保存上游凭据。                       |
+| 内容分析       | 支持结构化问答、风险判断、价值评分、生成治理和证据审计，覆盖六类业务场景。 |
+| 数据治理       | 执行数据价值评估、标签异常检测和风险识别，保存结果及处理建议。             |
+| 模型训练       | 支持可信 PyTorch 源码和已注册脚本任务，提供进度、日志、取消及产物下载。    |
+| 神经因果溯源   | 基于本地模型和案例材料执行干预分析，输出层级评分及关键组件结果。           |
 
 本项目负责模型服务，业务用户、文件入库等由独立业务后端提供。
 
@@ -24,16 +24,16 @@ uv sync --python 3.11
 
 首次使用时，将 `settings.example.json` 复制为 `settings.local.json` 并填写配置；已有配置请勿覆盖。
 
-| 配置项 | 说明 |
-| --- | --- |
-| `setup_secret` | 至少 32 个字符的随机管理员密钥。 |
-| `credential_key` | Fernet 加密密钥，用于保存模型 API Key；重启、迁移时保持不变。 |
-| `data_dir` | 本地任务文件目录，默认 `db`，相对配置文件所在目录解析。 |
-| `mysql_host` / `mysql_port` | 主存储 MySQL 地址和端口，默认 `127.0.0.1:3306`。 |
-| `mysql_user` / `mysql_password` | MySQL 账号和密码；密码必须配置。 |
-| `mysql_database` | MySQL 库名，默认 `content_safety`；本项目维护 `llm_` 表，并只读查询业务数据集表。 |
-| `business_api_base_url` | 业务 HTTP 接口根地址，默认 `http://127.0.0.1:8000/api/v1`。 |
-| `governance_mock_samples` | 治理任务的空记录模拟开关，默认 `false`。 |
+| 配置项                          | 说明                                                                              |
+| ------------------------------- | --------------------------------------------------------------------------------- |
+| `setup_secret`                  | 至少 32 个字符的随机管理员密钥。                                                  |
+| `credential_key`                | Fernet 加密密钥，用于保存模型 API Key；重启、迁移时保持不变。                     |
+| `data_dir`                      | 本地任务文件目录，默认 `db`，相对配置文件所在目录解析。                           |
+| `mysql_host` / `mysql_port`     | 主存储 MySQL 地址和端口，默认 `127.0.0.1:3306`。                                  |
+| `mysql_user` / `mysql_password` | MySQL 账号和密码；密码必须配置。                                                  |
+| `mysql_database`                | MySQL 库名，默认 `content_safety`；本项目维护 `llm_` 表，并只读查询业务数据集表。 |
+| `business_api_base_url`         | 业务 HTTP 接口根地址，默认 `http://127.0.0.1:8000/api/v1`。                       |
+| `governance_mock_samples`       | 治理任务的空记录模拟开关，默认 `false`。                                          |
 
 依次生成管理员密钥和 Fernet 密钥，将结果填入配置文件，替换模板占位值：
 
@@ -79,11 +79,11 @@ uv run python -m scripts.init_mysql
 
 异步任务需要对应 worker 执行。在独立终端按需启动，每类 worker 运行一个实例：
 
-| 任务 | 启动命令 |
-| --- | --- |
-| 数据治理 | `uv run python -m service.governance_worker` |
-| 模型训练 | `uv run python -m service.training_worker` |
-| 神经因果溯源 | `.venv/Scripts/python.exe -m service.neural_trace_worker`（Windows）；`.venv/bin/python -m service.neural_trace_worker`（Linux） |
+| 任务                 | 启动命令                                                                                                                         |
+| -------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| 数据治理与多语种分析 | `uv run python -m service.governance_worker`                                                                                     |
+| 模型训练             | `uv run python -m service.training_worker`                                                                                       |
+| 神经因果溯源         | `.venv/Scripts/python.exe -m service.neural_trace_worker`（Windows）；`.venv/bin/python -m service.neural_trace_worker`（Linux） |
 
 API 与 worker 使用同一配置、MySQL 数据库和任务文件目录；未启动 worker 时，任务会保持待执行状态。治理任务需指定数据版本及治理模型；训练按任务类型准备数据和运行环境。训练源码仅接受可信代码。
 
@@ -98,12 +98,13 @@ uv pip install --python .venv/bin/python -r neurotrace-run/requirements.txt
 
 `--check` 只确认模型文件和依赖存在，不验证真实 GPU 运行。附加依赖不在主项目锁文件中，安装后使用虚拟环境 Python 或下方 Linux 脚本启动 API 和各类 worker；后续执行 `uv sync` 后需重新安装附加依赖，避免 `uv run` 自动同步时移除它们。
 
-溯源 worker 默认拒绝已有 GPU 计算进程；Windows WDDM 桌面程序触发该检查时，可先退出旧 worker，再在上述溯源启动命令末尾加 `--allow-busy-gpu`。该选项会传给三个扫描阶段，不保证共享 GPU 的显存足够。HTTP 接口与管理端调用不变，失败任务需要重新提交，详见 [溯源接口与部署说明](神经因果溯源接口与部署.md)。
+溯源 worker 的构造函数与命令行均默认 `allow_busy_gpu=True`，允许 GPU 已有进程时继续，并将 `--allow-busy-gpu` 传给三个扫描阶段。需要启用 GPU 占用检查时，先退出旧 worker，再在上述溯源启动命令末尾加 `--no-allow-busy-gpu`；检测到计算进程时任务记为失败。HTTP 接口与管理端调用不变，失败任务需要重新提交，详见 [溯源接口与部署说明](神经因果溯源接口与部署.md)。
 
 Linux 可在依赖和配置准备完成后使用管理脚本：
 
 ```bash
 bash start-content-security.sh start                # 启动 API 和治理 worker
+bash start-content-security.sh restart governance   # 治理代码更新后重启 worker
 bash start-content-security.sh start training       # 按需启动训练 worker
 bash start-content-security.sh start neural-trace   # 按需启动溯源 worker
 bash start-content-security.sh status
@@ -114,7 +115,7 @@ bash start-content-security.sh stop
 
 脚本使用 `.venv/bin/python`，日志位于 `logs/`。默认 `start` 只启动 API 和治理，停止全部服务后需按需再次启动训练和溯源。
 
-完整用法：`bash start-content-security.sh {start|stop|restart|status|log|fg} [api|governance|training|neural-trace]`。每条命令最多指定一个服务；省略服务时，`stop/status` 面向全部服务，`restart` 重启当前已运行的服务（没有服务运行则启动 API 和治理），`log/fg` 选择 API。`fg` 用于前台调试，需先停止后台同类服务。脚本不透传 `--allow-busy-gpu` 等 worker 选项，需直接使用虚拟环境 Python 启动。Linux 完整部署步骤见 [Linux 服务部署](Linux服务部署.md)。
+完整用法：`bash start-content-security.sh {start|stop|restart|status|log|fg} [api|governance|training|neural-trace]`。每条命令最多指定一个服务；省略服务时，`stop/status` 面向全部服务，`restart` 重启当前已运行的服务（没有服务运行则启动 API 和治理），`log/fg` 选择 API。`fg` 用于前台调试，需先停止后台同类服务。脚本不透传 `--allow-busy-gpu`、`--no-allow-busy-gpu` 等 worker 选项，需直接使用虚拟环境 Python 启动。Linux 完整部署步骤见 [Linux 服务部署](Linux服务部署.md)。
 
 ## 测试
 

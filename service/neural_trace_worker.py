@@ -131,7 +131,8 @@ def main():
     parser = argparse.ArgumentParser(description="串行执行神经因果溯源任务；不会在启动时加载模型")
     parser.add_argument("--once", action="store_true", help="最多执行一个任务后退出")
     parser.add_argument("--check", action="store_true", help="只检查模型文件和依赖存在性，不加载模型、不领取任务")
-    parser.add_argument("--allow-busy-gpu", action="store_true", help="允许 GPU 已有进程时继续，并传递给扫描脚本")
+    parser.add_argument("--allow-busy-gpu", action=argparse.BooleanOptionalAction, default=True,
+                        help="默认允许 GPU 已有进程时继续；--no-allow-busy-gpu 启用占用检查")
     args = parser.parse_args()
     if args.check:
         check_model()
