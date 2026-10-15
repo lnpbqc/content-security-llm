@@ -2,6 +2,7 @@
 
 import json
 from typing import Any, Callable, Dict, List, Optional, Type, TypeVar
+from urllib.parse import urlsplit
 
 from openai import (
     APIConnectionError,
@@ -112,10 +113,13 @@ class ModelManager:
         try:
             parameters = {}
             if response_model is not None:
-                parameters["response_format"] = {
-                    "type": "json_schema",
-                    "json_schema": {"name": response_model.__name__, "schema": response_model.model_json_schema()},
-                }
+                if urlsplit(record.base_url).hostname == "api.deepseek.com":
+                    parameters["response_format"] = {"type": "json_object"}
+                else:
+                    parameters["response_format"] = {
+                        "type": "json_schema",
+                        "json_schema": {"name": response_model.__name__, "schema": response_model.model_json_schema()},
+                    }
             if temperature is not None:
                 parameters["temperature"] = temperature
             if max_tokens is not None:

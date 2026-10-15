@@ -16,7 +16,7 @@
 #
 # 同卡部署（一张 A100 80GB 上同时跑书生和 Qwen）:
 #   先起书生（start-internlm.sh start），等 1221 端口监听之后再起本服务（1222）。
-#   顺序、CACHE 比例、整卡校验见 Qwen3-8B-A100部署手册.md §2 与 §10。
+#   参数、启动顺序与验收见 Qwen3-8B-A100部署手册.md。
 
 set -uo pipefail
 
@@ -29,21 +29,19 @@ WORKDIR="${WORKDIR:-$HOME_DIR/qwen}"
 # 单卡 80GB 上两个服务都绑 0，不要分卡；机器上有别的卡时才改
 GPU="${GPU:-0}"
 
-# 显存不够时把 SESSION_LEN 降到 16384，CACHE 降到 0.4
-# 注意 SESSION_LEN 别超过 40960：这是 Qwen3-8B 的原生训练长度，再长要靠 rope scaling，见手册 §2
+# 上下文包含输入与输出；显存紧张时可用 SESSION_LEN=16384 覆盖
+# Qwen3-8B 原生上下文为 40960，长文本不要直接套用书生的 128K 配置
 SESSION_LEN="${SESSION_LEN:-32768}"
-# 与书生同卡时本服务后启动，0.6 从启动时的空闲显存里划走约 13 GiB 做 KV 池；
-# 整卡只跑 Qwen 时可以给 0.8
-CACHE="${CACHE:-0.6}"
-# 并发上限比书生低：Qwen3-8B 每 token 的 KV 是书生（InternLM3-8B）的 3 倍
-BATCH="${BATCH:-32}"
-MAXCONC="${MAXCONC:-16}"
+# 同卡省显存起步值；实际 KV 容量随启动时空闲显存变化
+CACHE="${CACHE:-0.3}"
+BATCH="${BATCH:-4}"
+MAXCONC="${MAXCONC:-4}"
 TP="${TP:-1}"
 # 启动前要求的最低空闲显存（MiB），不够就直接退出，别等它 OOM
 MIN_FREE_MIB="${MIN_FREE_MIB:-20480}"
 
 # 推理内容（<think>...</think>）从 content 里拆出来，单独走 reasoning_content 字段
-# 不设也能跑，但客户端拿到的正文里会混着思考标签
+# 名称按安装版本核对，可用 REASONING_PARSER 覆盖；此参数不会关闭思考
 REASONING_PARSER="${REASONING_PARSER:-default}"
 
 # lmdeploy 可执行文件；留空则自动从 PATH 里找
@@ -84,9 +82,9 @@ check_gpu_free() {
   [ "$free" -ge "$MIN_FREE_MIB" ] || die "空闲显存不足 $((MIN_FREE_MIB / 1024)) GiB：先停掉占卡的进程（nvidia-smi 看 pid），或降低 CACHE / SESSION_LEN。"
   if [ "$free" -gt 71680 ]; then
     echo "提示: 整卡几乎全空，书生还没起。先执行 ~/internlm/start-internlm.sh start，"
-    echo "      等 1221 监听之后再起本服务；顺序反了本服务会按 CACHE=$CACHE 划走约 38 GiB 的 KV，书生随后只划得到 2~3 GiB，满长请求装不下。"
+    echo "      等 1221 监听之后再起本服务；启动顺序会影响两边实际可用的 KV 容量。"
   elif [ "$free" -lt 30720 ]; then
-    echo "提示: 空闲显存偏紧，本次划到的 KV 池会明显变小；不够就下调 CACHE 或 SESSION_LEN（手册 §2）。"
+    echo "提示: 空闲显存偏紧；降低 CACHE 可减少预留，长请求还需核对 KV 容量及 SESSION_LEN。"
   fi
 }
 
@@ -108,7 +106,7 @@ is_running() {
 
 build_cmd() {
   # Qwen3 是 transformers 原生架构，不需要 --trust-remote-code
-  # （书生那边必须加，见 InternLM-A100部署手册.md §5）
+  # （书生那边必须加，见 InternLM-A100部署手册.md）
   CMD=(
     "$LMDEPLOY" serve api_server "$MODEL"
     --server-name 0.0.0.0

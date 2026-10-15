@@ -15,7 +15,7 @@
 #
 # 同卡部署（一张 A100 80GB 上同时跑书生和 Qwen）:
 #   两个服务都绑 GPU 0；先起书生（本脚本），等端口监听之后再起 Qwen（start-qwen.sh）。
-#   顺序、CACHE 比例、整卡校验见 InternLM-A100部署手册.md §2 与 §10。
+#   参数、启动顺序与验收见 InternLM-A100部署手册.md。
 
 set -uo pipefail
 
@@ -28,13 +28,12 @@ WORKDIR="${WORKDIR:-$HOME_DIR/internlm}"
 # 单卡 80GB 上两个服务都绑 0，不要分卡；机器上有别的卡时才改
 GPU="${GPU:-0}"
 
-# 20 万字符输入需要这个量级；要调小请同步降业务输入上限
-SESSION_LEN="${SESSION_LEN:-131072}"
-# 与 Qwen 同卡：书生先启动，0.4 从启动时的空闲显存里划走约 25 GiB 做 KV 池；
-# 整卡只跑书生时可以给 0.8
-CACHE="${CACHE:-0.4}"
-BATCH="${BATCH:-32}"
-MAXCONC="${MAXCONC:-16}"
+# 上下文包含输入与输出；长文本可用 SESSION_LEN=131072 覆盖并实测
+SESSION_LEN="${SESSION_LEN:-32768}"
+# 同卡省显存起步值；实际 KV 容量随启动时空闲显存变化
+CACHE="${CACHE:-0.2}"
+BATCH="${BATCH:-4}"
+MAXCONC="${MAXCONC:-4}"
 TP="${TP:-1}"
 # 启动前要求的最低空闲显存（MiB），不够就直接退出，别等它 OOM
 MIN_FREE_MIB="${MIN_FREE_MIB:-20480}"
@@ -76,7 +75,7 @@ check_gpu_free() {
   echo "GPU ${GPU:-全部} 空闲显存: $((free / 1024)) GiB"
   [ "$free" -ge "$MIN_FREE_MIB" ] || die "空闲显存不足 $((MIN_FREE_MIB / 1024)) GiB：先停掉占卡的进程（nvidia-smi 看 pid），或临时降低 CACHE / SESSION_LEN。"
   if [ "$free" -lt 61440 ]; then
-    echo "提示: 卡上已有别的进程在占显存，本次按 CACHE=$CACHE 划到的 KV 池会比手册 §2 里那份小。"
+    echo "提示: 卡上已有别的进程，实际 KV 容量受空闲显存影响；启动后用 status 核对。"
     echo "      同卡部署的正确顺序是先起书生、再起 Qwen。"
   fi
 }

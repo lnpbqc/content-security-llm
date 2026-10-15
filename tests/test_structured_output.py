@@ -14,6 +14,7 @@ from llm.governance_outputs import MultilingualSampleOutput
 from llm.models import InvocationError, ModelManager
 from llm.outputs import TextAnswer
 from llm.structured_output import StructuredOutputValidationError
+from service.inference import InferenceService
 
 
 class StructuredOutputTests(unittest.TestCase):
@@ -21,6 +22,7 @@ class StructuredOutputTests(unittest.TestCase):
         self.requests = []
         self.content = '{"answer":"checked"}'
         self.status = 200
+        self.accepted_format = None
         cipher = Fernet(Fernet.generate_key())
         model_patch = patch("llm.models.ModelRepository")
         calls_patch = patch("llm.models.CallRepository")
@@ -35,6 +37,11 @@ class StructuredOutputTests(unittest.TestCase):
 
         def handle(request):
             self.requests.append(json.loads(request.content))
+            if (self.accepted_format is not None
+                    and self.requests[-1].get("response_format", {}).get("type") != self.accepted_format):
+                return httpx.Response(400, json={"error": {
+                    "message": "Unsupported response_format.type", "type": "invalid_request_error",
+                }})
             if self.status != 200:
                 return httpx.Response(self.status, json={"error": {
                     "message": "private upstream detail", "type": "invalid_request_error",
@@ -89,6 +96,77 @@ class StructuredOutputTests(unittest.TestCase):
                 schema = sent["json_schema"]["schema"]
                 self.assertEqual(schema, response_model.model_json_schema())
                 self.assertIn("$defs", schema)
+
+    def test_deepseek_official_chat_uses_supported_json_object_format(self):
+        self.accepted_format = "json_object"
+        self.manager.models.get.return_value.upstream_model_id = "deepseek-flash"
+        for base_url in ("https://api.deepseek.com/", "https://api.deepseek.com/v1"):
+            with self.subTest(base_url=base_url):
+                self.manager.models.get.return_value.base_url = base_url
+                count = len(self.requests)
+                result = self.invoke()
+                self.assertEqual(result.answer, "checked")
+                self.assertEqual(len(self.requests), count + 1)
+                sent = self.requests[-1]
+                self.assertEqual(sent["response_format"], {"type": "json_object"})
+                self.assertEqual(sent["model"], "deepseek-flash")
+                schema = sent["messages"][0]["content"].split("JSON Schema:\n", 1)[1]
+                self.assertEqual(json.loads(schema), TextAnswer.model_json_schema())
+
+    def test_deepseek_name_or_url_substring_does_not_change_other_providers(self):
+        self.manager.models.get.return_value.upstream_model_id = "deepseek-flash"
+        for base_url in ("https://model.invalid/v1", "https://api.deepseek.com.proxy.invalid/v1",
+                         "https://proxy.invalid/api.deepseek.com"):
+            with self.subTest(base_url=base_url):
+                self.manager.models.get.return_value.base_url = base_url
+                self.invoke()
+                self.assertEqual(self.requests[-1]["response_format"]["type"], "json_schema")
+
+    def test_deepseek_json_mode_still_enforces_schema_and_business_rules(self):
+        self.manager.models.get.return_value.base_url = "https://api.deepseek.com/"
+        self.accepted_format = "json_object"
+        for content in ("{}", '{"answer":"checked","extra":true}'):
+            with self.subTest(content=content):
+                self.content = content
+                with self.assertRaises(InvocationError) as raised:
+                    self.invoke()
+                self.assertEqual(raised.exception.code, "invalid_structured_output")
+                self.assertIsNone(self.calls.create.call_args.kwargs["output_json"])
+
+        self.content = '{"answer":"checked"}'
+
+        def validate(result):
+            raise StructuredOutputValidationError("引用来源或原文不匹配")
+
+        with self.assertRaises(InvocationError) as raised:
+            self.invoke(validator=validate)
+        self.assertEqual(raised.exception.code, "invalid_structured_output")
+        self.assertIsNone(self.calls.create.call_args.kwargs["output_json"])
+
+    def test_deepseek_text_generation_does_not_request_json(self):
+        self.manager.models.get.return_value.base_url = "https://api.deepseek.com/"
+        self.content = "plain answer"
+        result = self.manager.invoke_text("model-test", "check input", token_hash="token-test")
+        self.assertEqual(result, "plain answer")
+        self.assertNotIn("response_format", self.requests[-1])
+
+    def test_deepseek_anomaly_repair_matches_frontend_invocation(self):
+        self.manager.models.get.return_value.base_url = "https://api.deepseek.com/"
+        self.manager.models.get.return_value.upstream_model_id = "deepseek-flash"
+        self.accepted_format = "json_object"
+        expected = {"findings": [], "primaryType": "无异常", "source": {"filename": "input", "line": 1},
+                    "fieldChanges": [], "reason": "未发现异常", "validationResults": []}
+        self.content = json.dumps(expected, ensure_ascii=False)
+        service = InferenceService(self.manager)
+        result = service.invoke("model-test", "1111", "anomaly_repair", "token-test")
+        self.assertEqual(result.result, expected)
+        self.assertEqual(result.response_type, "anomaly_repair")
+        self.assertEqual(self.requests[-1]["messages"][-1]["content"], "1111")
+        self.assertEqual(self.requests[-1]["response_format"], {"type": "json_object"})
+        self.content = "{}"
+        with self.assertRaises(InvocationError) as raised:
+            service.invoke("model-test", "1111", "anomaly_repair", "token-test")
+        self.assertEqual(raised.exception.code, "invalid_structured_output")
 
     def test_text_generation_does_not_request_json(self):
         self.content = "plain answer"
