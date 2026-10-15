@@ -29,6 +29,7 @@ db/*.sqlite3*
 *.txt
 *.json
 *.csv
+*.png
 docs/
 !/README.md
 !/神经因果溯源接口与部署.md
@@ -38,6 +39,9 @@ docs/
 !/curl接口测试.md
 !/Linux服务部署.md
 !/settings.example.json
+!/Qwen/*.md
+!/书生/*.md
+!/书生/*.png
 
 # 溯源运行必需的依赖及案例输入
 !/neurotrace-run/requirements.txt

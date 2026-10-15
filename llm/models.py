@@ -111,6 +111,11 @@ class ModelManager:
         client = None
         try:
             parameters = {}
+            if response_model is not None:
+                parameters["response_format"] = {
+                    "type": "json_schema",
+                    "json_schema": {"name": response_model.__name__, "schema": response_model.model_json_schema()},
+                }
             if temperature is not None:
                 parameters["temperature"] = temperature
             if max_tokens is not None:
