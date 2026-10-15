@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>InternLM 3-8B 对话</title>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#171a21; --panel2:#1e222b; --line:#2a2f3a;
+    --fg:#e6e8ee; --dim:#9aa3b2; --accent:#4f8cff; --user:#22304a; --err:#ff6b6b;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0}
+  body{
+    background:var(--bg); color:var(--fg); display:flex; flex-direction:column;
+    font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif;
+  }
+  details.cfg{background:var(--panel);border-bottom:1px solid var(--line);padding:10px 16px}
+  details.cfg summary{cursor:pointer;color:var(--dim);font-size:13px;outline:none}
+  details.cfg summary b{color:var(--fg)}
+  .grid{display:grid;grid-template-columns:2fr 2fr 1fr 1fr 80px;gap:10px;margin-top:10px}
+  .grid label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--dim)}
+  input,textarea,button,select{
+    background:var(--panel2);color:var(--fg);border:1px solid var(--line);
+    border-radius:7px;padding:7px 9px;font:inherit;outline:none;
+  }
+  input:focus,textarea:focus{border-color:var(--accent)}
+  button{cursor:pointer}
+  button:hover{border-color:var(--accent)}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  #chat{flex:1;overflow-y:auto;padding:20px 16px 8px;display:flex;flex-direction:column;gap:14px}
+  .wrap{max-width:860px;width:100%;margin:0 auto;display:flex}
+  .wrap.u{justify-content:flex-end}
+  .bub{padding:10px 14px;border-radius:12px;max-width:88%;overflow-wrap:anywhere;white-space:normal}
+  .u .bub{background:var(--user);border:1px solid #2c3f63}
+  .a .bub{background:var(--panel);border:1px solid var(--line)}
+  .bub.err{border-color:var(--err);color:var(--err);white-space:pre-wrap;font-family:ui-monospace,Consolas,monospace;font-size:12.5px}
+  .bub pre{background:#0b0d11;border:1px solid var(--line);border-radius:8px;padding:10px;overflow-x:auto;margin:8px 0}
+  .bub code{background:#0b0d11;border-radius:4px;padding:1px 5px;font-family:ui-monospace,Consolas,monospace;font-size:12.5px}
+  .bub pre code{background:none;padding:0}
+  .bub h1,.bub h2,.bub h3{margin:10px 0 4px;line-height:1.3}
+  .bub h1{font-size:17px}.bub h2{font-size:16px}.bub h3{font-size:15px}
+  .bub p{margin:6px 0}
+  .bub ul{margin:6px 0;padding-left:20px}
+  .bub a{color:var(--accent)}
+  footer{border-top:1px solid var(--line);background:var(--panel);padding:12px 16px 16px}
+  .composer{max-width:860px;margin:0 auto;display:flex;gap:10px;align-items:flex-end}
+  #input{flex:1;resize:none;min-height:46px;max-height:180px;line-height:1.5}
+  #send{min-width:74px;height:46px;background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+  #stop{height:46px;display:none}
+  .hint{max-width:860px;margin:8px auto 0;color:var(--dim);font-size:12px;display:flex;justify-content:space-between}
+  .dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--dim);margin-right:6px}
+  .dot.ok{background:#3ddc84}.dot.bad{background:var(--err)}
+</style>
+</head>
+<body>
+
+<details class="cfg">
+  <summary>连接设置　<span class="dot" id="dot"></span><b id="cfginfo">未配置</b></summary>
+  <div class="grid">
+    <label>服务地址（平台给的外网地址）
+      <input id="base" placeholder="https://a21337217859973120620205-secuplat1web.svc.bitahub.com:20443/" value="https://a21337217859973120620205-secuplat1web.svc.bitahub.com:20443/">
+    </label>
+    <label>API Key
+      <input id="key" type="password" placeholder="启动时 --api-keys 设的那个" value="gzhu-yyds">
+    </label>
+    <label>模型名
+      <input id="model" placeholder="/data/models/internlm3-8b-instruct" value="/data/models/internlm3-8b-instruct">
+    </label>
+    <label>temperature
+      <input id="temp" type="number" step="0.1" min="0" max="2" value="0.7">
+    </label>
+    <label>max_tokens
+      <input id="maxtok" type="number" step="128" min="1" value="2048">
+    </label>
+  </div>
+  <div class="grid" style="grid-template-columns:1fr 120px 120px 120px">
+    <label>System Prompt
+      <input id="sys" value="You are an AI assistant whose name is InternLM (书生·浦语).">
+    </label>
+    <label>&nbsp;<button id="ping" style="height:36px">测试连接</button></label>
+    <label>&nbsp;<button id="clear" style="height:36px">清空对话</button></label>
+    <label>&nbsp;<button id="save" style="height:36px">保存设置</button></label>
+  </div>
+</details>
+
+<div id="chat"></div>
+
+<footer>
+  <div class="composer">
+    <textarea id="input" placeholder="输入消息，Enter 发送，Shift+Enter 换行"></textarea>
+    <button id="stop">停止</button>
+    <button id="send">发送</button>
+  </div>
+  <div class="hint">
+    <span id="status">就绪</span>
+    <span id="usage"></span>
+  </div>
+</footer>
+
+<script>
+const $ = id => document.getElementById(id);
+const chat = $('chat');
+let messages = [];      // 会话上下文
+let ctrl = null;        // 用于打断流式
+
+/* ---------- 设置持久化 ---------- */
+const FIELDS = ['base','key','model','temp','maxtok','sys'];
+function loadCfg(){
+  const s = JSON.parse(localStorage.getItem('internlm-cfg') || '{}');
+  for (const f of FIELDS) if (s[f] !== undefined) $(f).value = s[f];
+  if (!$('model').value) $('model').value = 'internlm3-8b';
+  paint();
+}
+function saveCfg(){
+  const s = {};
+  for (const f of FIELDS) s[f] = $(f).value;
+  localStorage.setItem('internlm-cfg', JSON.stringify(s));
+  paint();
+  setStatus('设置已保存到本机浏览器');
+}
+function paint(){
+  const b = $('base').value.trim();
+  const ok = /^https?:\/\//.test(b) && $('key').value.trim();
+  $('dot').className = 'dot ' + (ok ? 'ok' : 'bad');
+  $('cfginfo').textContent = ok ? b : '未配置';
+}
+
+/* ---------- 端点拼接 ---------- */
+function endpoint(path){
+  let b = $('base').value.trim().replace(/\/+$/,'');
+  if (!b) throw new Error('请先填服务地址');
+  if (!/\/v1$/.test(b)) b += '/v1';
+  return b + path;
+}
+function headers(){
+  return { 'Content-Type':'application/json', 'Authorization':'Bearer ' + $('key').value.trim() };
+}
+function setStatus(t){ $('status').textContent = t; }
+
+/* ---------- 极简 Markdown 渲染（无外部依赖） ---------- */
+function esc(s){
+  return s.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+}
+function md(src){
+  const blocks = [], inls = [];
+  let h = esc(src);
+  h = h.replace(/```[^\n]*\n([\s\S]*?)```/g, (m, code) => {
+    blocks.push(code.replace(/\n$/,''));
+    return '\u0000B' + (blocks.length-1) + '\u0000';
+  });
+  h = h.replace(/`([^`\n]+)`/g, (m, code) => {
+    inls.push(code);
+    return '\u0000I' + (inls.length-1) + '\u0000';
+  });
+  h = h.replace(/^### (.*)$/gm,'<h3>$1</h3>')
+       .replace(/^## (.*)$/gm,'<h2>$1</h2>')
+       .replace(/^# (.*)$/gm,'<h1>$1</h1>')
+       .replace(/\*\*([^*\n]+)\*\*/g,'<strong>$1</strong>')
+       .replace(/\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\)/g,'<a href="$2" target="_blank" rel="noopener">$1</a>');
+  h = h.replace(/^[ \t]*[-*] (.*)$/gm,'<li>$1</li>');
+  h = h.replace(/(?:<li>[\s\S]*?<\/li>\s*)+/g, m => '<ul>' + m + '</ul>');
+  // 段落包装：按代码块占位符切段，只包装纯文本段
+  h = h.split(/(\u0000B\d+\u0000)/).map(seg => {
+    if (/^\u0000B\d+\u0000$/.test(seg)) return seg;
+    const t = seg.trim();
+    if (!t) return '';
+    if (/^<(h[1-3]|ul|pre|li)/.test(t)) return t;
+    return '<p>' + t.replace(/\n/g,'<br>') + '</p>';
+  }).join('');
+  h = h.replace(/\u0000I(\d+)\u0000/g, (m,i) => '<code>' + inls[i] + '</code>');
+  h = h.replace(/\u0000B(\d+)\u0000/g, (m,i) => '<pre><code>' + blocks[i] + '</code></pre>');
+  return h;
+}
+
+/* ---------- 气泡 ---------- */
+function bubble(role, text){
+  const wrap = document.createElement('div');
+  wrap.className = 'wrap ' + (role === 'user' ? 'u' : 'a');
+  const b = document.createElement('div');
+  b.className = 'bub';
+  b.innerHTML = role === 'user' ? esc(text).replace(/\n/g,'<br>') : md(text);
+  wrap.appendChild(b);
+  chat.appendChild(wrap);
+  scrollDown();
+  return b;
+}
+function scrollDown(){ chat.scrollTop = chat.scrollHeight; }
+
+/* ---------- 发送 ---------- */
+async function send(){
+  const text = $('input').value.trim();
+  if (!text) return;
+  if (!$('base').value.trim()) { $('base').focus(); return; }
+
+  $('input').value = '';
+  autoGrow();
+  bubble('user', text);
+  messages.push({ role:'user', content:text });
+
+  const payload = {
+    model: $('model').value.trim() || 'internlm3-8b',
+    messages: [{ role:'system', content: $('sys').value.trim() }, ...messages],
+    temperature: parseFloat($('temp').value) || 0.7,
+    max_tokens: parseInt($('maxtok').value) || 2048,
+    stream: true
+  };
+
+  const out = bubble('assistant', '');
+  out.textContent = '…';
+  let acc = '', first = true;
+  ctrl = new AbortController();
+  $('send').disabled = true; $('stop').style.display = 'block';
+  setStatus('生成中');
+  const t0 = performance.now();
+
+  try{
+    const res = await fetch(endpoint('/chat/completions'), {
+      method:'POST', headers: headers(), body: JSON.stringify(payload), signal: ctrl.signal
+    });
+    if (!res.ok){
+      const body = await res.text();
+      throw new Error('HTTP ' + res.status + '\n' + body.slice(0, 800));
+    }
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    while (true){
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream:true });
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for (const line of lines){
+        const s = line.trim();
+        if (!s.startsWith('data:')) continue;
+        const data = s.slice(5).trim();
+        if (data === '[DONE]') continue;
+        let j; try { j = JSON.parse(data); } catch { continue; }
+        const d = j.choices && j.choices[0] && j.choices[0].delta;
+        const piece = d && (d.content || d.reasoning_content);
+        if (piece){
+          if (first){ out.textContent = ''; first = false; const ttft = ((performance.now()-t0)/1000).toFixed(2); setStatus('首字 ' + ttft + 's'); }
+          acc += piece;
+          out.innerHTML = md(acc);
+          scrollDown();
+        }
+        if (j.usage){
+          $('usage').textContent = 'prompt ' + j.usage.prompt_tokens + ' / completion ' + j.usage.completion_tokens;
+        }
+      }
+    }
+    const dt = (performance.now()-t0)/1000;
+    if (!acc){ out.textContent = '(模型没有返回内容)'; }
+    else {
+      const tok = $('usage').textContent.match(/completion (\d+)/);
+      const tps = tok ? (tok[1]/dt).toFixed(1) : '—';
+      setStatus('完成　' + dt.toFixed(1) + 's　' + tps + ' tok/s');
+      messages.push({ role:'assistant', content: acc });
+    }
+  } catch (e){
+    if (e.name === 'AbortError'){
+      if (acc) messages.push({ role:'assistant', content: acc });
+      setStatus('已停止');
+    } else {
+      out.className = 'bub err';
+      out.textContent = String(e.message || e);
+      setStatus('失败');
+      messages.pop();   // 失败的这轮不进上下文
+    }
+  } finally {
+    ctrl = null;
+    $('send').disabled = false; $('stop').style.display = 'none';
+  }
+}
+
+/* ---------- 测试连接 ---------- */
+async function ping(){
+  const btn = $('ping');
+  btn.disabled = true; setStatus('测试中…');
+  try{
+    const res = await fetch(endpoint('/models'), { headers: headers() });
+    if (!res.ok) throw new Error('HTTP ' + res.status + ' ' + (await res.text()).slice(0,300));
+    const j = await res.json();
+    const ids = (j.data || []).map(m => m.id);
+    setStatus('连接正常');
+    alert('连接成功\n\n可用模型：\n' + (ids.join('\n') || '(未返回模型列表)') +
+          '\n\n如果这里显示的模型名和上面填的不一样，请改成：' + (ids[0] || ''));
+    if (ids[0] && !$('model').value.trim()) { $('model').value = ids[0]; saveCfg(); }
+  } catch (e){
+    setStatus('连接失败');
+    alert('连接失败：\n\n' + (e.message || e) +
+      '\n\n排查顺序：\n1. 服务地址是否和平台控制台复制的一致\n2. LMDeploy 是否在跑，ss -lntp | grep 端口\n3. 是否绑的 0.0.0.0 而不是 127.0.0.1\n4. API Key 是否和 --api-keys 一致\n5. 浏览器控制台看是否有 CORS 报错');
+  } finally { btn.disabled = false; }
+}
+
+/* ---------- 其他交互 ---------- */
+function autoGrow(){ const el = $('input'); el.style.height = 'auto'; el.style.height = Math.min(el.scrollHeight, 180) + 'px'; }
+
+$('send').onclick = send;
+$('stop').onclick = () => { if (ctrl) ctrl.abort(); };
+$('ping').onclick = ping;
+$('save').onclick = saveCfg;
+$('clear').onclick = () => { messages = []; chat.innerHTML = ''; $('usage').textContent = ''; setStatus('已清空'); };
+$('input').addEventListener('input', autoGrow);
+$('input').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing){ e.preventDefault(); send(); }
+});
+for (const f of FIELDS) $(f).addEventListener('change', paint);
+
+loadCfg();
+</script>
+</body>
+</html>
