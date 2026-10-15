@@ -23,6 +23,8 @@ class StructuredOutputTests(unittest.TestCase):
         self.content = '{"answer":"checked"}'
         self.status = 200
         self.accepted_format = None
+        self.reasoning_when_thinking = False
+        self.reasoning_content = None
         cipher = Fernet(Fernet.generate_key())
         model_patch = patch("llm.models.ModelRepository")
         calls_patch = patch("llm.models.CallRepository")
@@ -46,11 +48,15 @@ class StructuredOutputTests(unittest.TestCase):
                 return httpx.Response(self.status, json={"error": {
                     "message": "private upstream detail", "type": "invalid_request_error",
                 }})
+            content, reasoning = self.content, self.reasoning_content
+            if (self.reasoning_when_thinking and self.requests[-1].get("response_format")
+                    and self.requests[-1].get("chat_template_kwargs", {}).get("enable_thinking") is not False):
+                content, reasoning = "", self.content
             return httpx.Response(200, json={
                 "id": "completion-test", "object": "chat.completion", "created": 1,
                 "model": "upstream-test", "choices": [{
                     "index": 0, "finish_reason": "stop",
-                    "message": {"role": "assistant", "content": self.content},
+                    "message": {"role": "assistant", "content": content, "reasoning_content": reasoning},
                 }],
             })
 
@@ -167,6 +173,41 @@ class StructuredOutputTests(unittest.TestCase):
         with self.assertRaises(InvocationError) as raised:
             service.invoke("model-test", "1111", "anomaly_repair", "token-test")
         self.assertEqual(raised.exception.code, "invalid_structured_output")
+
+    def test_qwen_structured_request_disables_thinking_to_keep_json_in_content(self):
+        self.manager.models.get.return_value.upstream_model_id = "/data/models/Qwen3-8B"
+        self.manager.models.get.return_value.base_url = "http://127.0.0.1:1222/v1"
+        self.reasoning_when_thinking = True
+        result = self.invoke()
+        self.assertEqual(result.answer, "checked")
+        self.assertEqual(self.requests[-1]["chat_template_kwargs"], {"enable_thinking": False})
+        self.assertEqual(self.requests[-1]["response_format"]["type"], "json_schema")
+        self.assertEqual(len(self.requests), 1)
+
+    def test_internlm_structured_request_has_no_thinking_override(self):
+        self.manager.models.get.return_value.upstream_model_id = "/data/models/internlm3-8b-instruct"
+        self.manager.models.get.return_value.base_url = "http://127.0.0.1:1221/v1"
+        self.invoke()
+        self.assertNotIn("chat_template_kwargs", self.requests[-1])
+        self.assertEqual(self.requests[-1]["response_format"]["type"], "json_schema")
+
+    def test_qwen_plain_text_request_keeps_existing_thinking_settings(self):
+        self.manager.models.get.return_value.upstream_model_id = "/data/models/Qwen3-8B"
+        self.content = "plain answer"
+        result = self.manager.invoke_text("model-test", "check input", token_hash="token-test")
+        self.assertEqual(result, "plain answer")
+        self.assertNotIn("chat_template_kwargs", self.requests[-1])
+        self.assertNotIn("response_format", self.requests[-1])
+
+    def test_qwen_empty_content_does_not_use_reasoning_as_business_result(self):
+        self.manager.models.get.return_value.upstream_model_id = "/data/models/Qwen3-8B"
+        self.reasoning_content = '{"answer":"private reasoning"}'
+        self.content = ""
+        with self.assertRaises(InvocationError) as raised:
+            self.invoke()
+        self.assertEqual(raised.exception.code, "empty_response")
+        self.assertNotIn("private reasoning", str(raised.exception))
+        self.assertIsNone(self.calls.create.call_args.kwargs["output_json"])
 
     def test_text_generation_does_not_request_json(self):
         self.content = "plain answer"

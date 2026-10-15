@@ -120,6 +120,8 @@ class ModelManager:
                         "type": "json_schema",
                         "json_schema": {"name": response_model.__name__, "schema": response_model.model_json_schema()},
                     }
+                    if record.upstream_model_id.rstrip("/").rsplit("/", 1)[-1].lower() == "qwen3-8b":
+                        parameters["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
             if temperature is not None:
                 parameters["temperature"] = temperature
             if max_tokens is not None:
