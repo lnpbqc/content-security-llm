@@ -46,7 +46,23 @@ class ScriptDefinition:
                 "parameters_schema": self.parameters.model_json_schema()}
 
 
+class MiniInputs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class MiniParameters(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, allow_inf_nan=False)
+    epochs: int = Field(default=3, ge=1, le=20)
+    learning_rate: float = Field(default=0.05, gt=0, le=1)
+    seed: int = Field(default=42, ge=0, le=2**32 - 1)
+    samples: int = Field(default=512, ge=64, le=8192)
+    hidden_size: int = Field(default=32, ge=4, le=256)
+
+
 SCRIPTS = {
+    "mini-mlp": ScriptDefinition(
+        "迷你 MLP（演示链路）", "合成二维数据的真实小网络训练；秒级完成，用于验证脚本任务、事件与产物链路。",
+        PROJECT_ROOT / "training_scripts" / "mini_mlp.py", MiniInputs, MiniParameters),
     "cifar100-cnn": ScriptDefinition(
         "CIFAR-100 小型 CNN", "真实百分类训练示例；固定 CNN/AdamW，使用独立数据缓存。",
         PROJECT_ROOT / "training_scripts" / "cifar100.py", CifarInputs, CifarParameters),
