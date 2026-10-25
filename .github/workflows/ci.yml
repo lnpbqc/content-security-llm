@@ -1,0 +1,42 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: content_security_llm_test
+          MYSQL_USER: ci_llm
+          MYSQL_PASSWORD: ci_llm_pass
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -proot"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      TEST_MYSQL_HOST: 127.0.0.1
+      TEST_MYSQL_PORT: '3306'
+      TEST_MYSQL_USER: ci_llm
+      TEST_MYSQL_PASSWORD: ci_llm_pass
+      TEST_MYSQL_DATABASE: content_security_llm_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --frozen
+      - name: Run pytest
+        env:
+          # conftest 走 Settings.load()：setup_secret 需 ≥32 字符，
+          # credential_key 需为当次生成的合法 Fernet key（不落库存明文）。
+          APP_SETUP_SECRET: ci-only-setup-secret-0123456789abcdef0123456789abcdef
+        run: |
+          export MODEL_CREDENTIAL_KEY="$(uv run python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')"
+          uv run pytest -q
