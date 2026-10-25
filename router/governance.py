@@ -314,9 +314,12 @@ def latest_risk(request: Request, scope: Dict[str, Any] = Depends(query_scope),
     return _latest(request, "governance-risk", scope, service, token_hash)
 
 
-def _weight_accuracy(correct: int, total: int) -> Dict[str, Any]:
-    return {"accuracyPercent": round(correct / total * 100, 1) if total else None,
-            "correctCount": correct, "totalCount": total}
+def _weight_accuracy(correct: int, total: int, valid: int | None = None) -> Dict[str, Any]:
+    payload = {"accuracyPercent": round(correct / total * 100, 1) if total else None,
+               "correctCount": correct, "totalCount": total}
+    if valid is not None:
+        payload["validCount"] = valid
+    return payload
 
 
 @router.get("/data-governance/risk-weight-accuracy/overview", dependencies=[risk_kind],
@@ -326,7 +329,7 @@ def risk_weight_accuracy_overview(request: Request,
                                   token_hash: str = Depends(require_token)):
     """每个数据集版本和方案只汇总最新的全语种风险检测。"""
     seen = set()
-    correct = total = 0
+    correct = total = valid_total = 0
     for result in service.repository.list_result_summaries("governance-risk", token_hash):
         scope = result["scope"]
         key = (scope["dataset_id"], scope["version_id"], scope["scheme_id"])
@@ -335,7 +338,8 @@ def risk_weight_accuracy_overview(request: Request,
         seen.add(key)
         correct += result["summary"].get("accuracy_correct_count", 0)
         total += result["summary"].get("accuracy_test_count", 0)
-    return success(request, _weight_accuracy(correct, total))
+        valid_total += result["summary"].get("valid_count", 0)
+    return success(request, _weight_accuracy(correct, total, valid_total if seen else None))
 
 
 @router.get("/data-governance/risk-results", dependencies=[risk_kind])
@@ -363,7 +367,8 @@ def risk_result_weight_accuracy(request: Request, result_id: str,
     """返回指定风险检测批次保存的标准档位判别准确率。"""
     summary = _get_result(service, result_id, "governance-risk", token_hash, summary_only=True)["summary"]
     return success(request, _weight_accuracy(summary.get("accuracy_correct_count", 0),
-                                             summary.get("accuracy_test_count", 0)))
+                                             summary.get("accuracy_test_count", 0),
+                                             summary.get("valid_count")))
 
 
 @router.get("/data-governance/risk-results/{result_id}/samples", dependencies=[risk_kind])

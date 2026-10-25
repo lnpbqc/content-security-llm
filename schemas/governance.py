@@ -25,6 +25,7 @@ class RiskWeightAccuracy(PublicModel):
     accuracyPercent: float | None = Field(description="0～100 百分比；没有标准标签时为 null")
     correctCount: int
     totalCount: int
+    validCount: int | None = Field(default=None, description="本批次有效检测样本总数；与 totalCount（有标准档位标注数）构成双口径分母")
 
 
 class MultilingualScopePublic(PublicModel):

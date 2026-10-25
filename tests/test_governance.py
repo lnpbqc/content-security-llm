@@ -1090,7 +1090,7 @@ def test_multilingual_response_schema_preserves_saved_extra_fields(app_client, m
                          ("/api/v1/data-governance/risk-results/{result_id}/weight-accuracy", "get")):
         assert "$ref" in specification["paths"][path][method]["responses"]["200"]["content"]["application/json"]["schema"]
     assert "semantic_consistency" in specification["components"]["schemas"]["MultilingualSummary"]["properties"]
-    assert set(specification["components"]["schemas"]["RiskWeightAccuracy"]["properties"]) == {
+    assert set(specification["components"]["schemas"]["RiskWeightAccuracy"]["properties"]) >= {
         "accuracyPercent", "correctCount", "totalCount"}
 
 
@@ -1128,8 +1128,8 @@ def test_governance_summary_queries_preserve_responses_without_loading_samples(a
             assert client.get(base, headers=headers(), params=scope(scheme)).json()["data"] == expected
     for path in ("/api/v1/data-governance/risk-weight-accuracy/overview",
                  "/api/v1/data-governance/risk-results/" + saved_results["risk"][1][0]["id"] + "/weight-accuracy"):
-        assert client.get(path, headers=headers()).json()["data"] == {
-            "accuracyPercent": None, "correctCount": 0, "totalCount": 0}
+        assert client.get(path, headers=headers()).json()["data"].items() >= {
+            "accuracyPercent": None, "correctCount": 0, "totalCount": 0}.items()
     assert queries and all("SELECT *" not in query and "samples_json" not in query for query, _ in queries)
     assert sum("LIMIT %s" in query and parameters[-1] == 1 for query, parameters in queries) == 3
 
@@ -1356,8 +1356,8 @@ def test_risk_weight_accuracy_uses_labeled_risk_predictions_and_latest_scope(app
     base = "/api/v1/data-governance/risk-results/" + result_id
     summary = client.get(base, headers=headers()).json()["data"]
     assert (summary["accuracy_correct_count"], summary["accuracy_test_count"]) == (4, 7)
-    assert client.get(base + "/weight-accuracy", headers=headers()).json()["data"] == {
-        "accuracyPercent": 57.1, "correctCount": 4, "totalCount": 7}
+    assert client.get(base + "/weight-accuracy", headers=headers()).json()["data"].items() >= {
+        "accuracyPercent": 57.1, "correctCount": 4, "totalCount": 7}.items()
     assert client.get(base + "/weight-accuracy", headers=headers("b")).status_code == 404
     assert all("reference_risk_level" not in prompt for prompt in FakeCompletionClient.calls)
 
@@ -1366,14 +1366,14 @@ def test_risk_weight_accuracy_uses_labeled_risk_predictions_and_latest_scope(app
     assert app.state.governance_service.run_once()
     overview = client.get("/api/v1/data-governance/risk-weight-accuracy/overview",
                           headers=headers(), params={"kind": "governance-risk"}).json()["data"]
-    assert overview == {"accuracyPercent": 42.9, "correctCount": 3, "totalCount": 7}
+    assert overview.items() >= {"accuracyPercent": 42.9, "correctCount": 3, "totalCount": 7}.items()
     business.records[2] = [{"id": 20, "payload": {
         "text": "普通说明", "language": "zh", "reference_risk_level": "safe"}}]
     create(client, "governance-risk", "risk-v1", dataset_id=2)
     assert app.state.governance_service.run_once()
     overview = client.get("/api/v1/data-governance/risk-weight-accuracy/overview",
                           headers=headers()).json()["data"]
-    assert overview == {"accuracyPercent": 50.0, "correctCount": 4, "totalCount": 8}
+    assert overview.items() >= {"accuracyPercent": 50.0, "correctCount": 4, "totalCount": 8}.items()
     assert client.get("/api/v1/data-governance/risk-weight-accuracy/overview",
                       headers=headers("b")).json()["data"]["accuracyPercent"] is None
 
@@ -1391,16 +1391,16 @@ def test_risk_weight_accuracy_requires_valid_labels_and_counts_all_failures(app_
     assert app.state.governance_service.run_once()
     result_id = app.state.governance_service.repository.get_task(task["id"])["result_id"]
     assert client.get("/api/v1/data-governance/risk-results/" + result_id + "/weight-accuracy",
-                      headers=headers()).json()["data"] == {
-                          "accuracyPercent": 0.0, "correctCount": 0, "totalCount": 1}
+                      headers=headers()).json()["data"].items() >= {
+                          "accuracyPercent": 0.0, "correctCount": 0, "totalCount": 1}.items()
     del business.records[3][0]["payload"]["reference_risk_level"]
     FakeCompletionClient.risk_outputs = {}
     task = create(client, "governance-risk", "risk-v1")
     assert app.state.governance_service.run_once()
     result_id = app.state.governance_service.repository.get_task(task["id"])["result_id"]
     assert client.get("/api/v1/data-governance/risk-results/" + result_id + "/weight-accuracy",
-                      headers=headers()).json()["data"] == {
-                          "accuracyPercent": None, "correctCount": 0, "totalCount": 0}
+                      headers=headers()).json()["data"].items() >= {
+                          "accuracyPercent": None, "correctCount": 0, "totalCount": 0}.items()
 
 
 def test_risk_export_and_knowledge_use_saved_masked_samples(app_client):

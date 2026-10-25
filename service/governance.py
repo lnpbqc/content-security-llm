@@ -346,11 +346,16 @@ class GovernanceService:
                 predicted_levels[sample["id"]] = ({"LOW": "low", "MEDIUM": "medium", "HIGH": "high"}.get(level)
                                                   if findings else "safe")
             primary = min(findings, key=lambda finding: order[finding["suggestedLevel"]]) if findings else None
+            reference = sample["metadata"].get("reference_risk_level")
+            predicted = predicted_levels.get(sample["id"])
             rows.append({"id": sample["id"], "dataset_id": sample["dataset_id"],
                          "version_id": sample["version_id"], "revision_id": sample["revision_id"],
                          "text": self.data.risk_text(sample["text"]), "language": sample["language"],
                          "primary_category": primary["category"] if primary else "",
                          "maximum_suggested_level": level,
+                         # 比对明细导出用：标准档位与逐样本对错（缺任一方时为 null，不猜测）。
+                         "reference_risk_level": reference,
+                         "prediction_correct": (predicted == reference) if reference and predicted else None,
                          "status": ("无法评估" if output["status"] == "unassessable" else
                                     "待复核" if findings and output["reviewRecommended"] else "未发起"),
                          "findings": findings, "evidence": self._risk_evidence(sample),
