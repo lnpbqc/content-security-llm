@@ -22,6 +22,7 @@ dev = ["pytest>=8"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 
 [[tool.uv.index]]
 name = "pytorch-cu128"
