@@ -237,6 +237,9 @@ class GovernanceService:
         scope = task["scope"]
         return {"id": result_id, "task_id": task["id"], "scope": scope,
                 "dataset_name": self.data.dataset_name(scope["dataset_id"], scope["version_id"]),
+                # 清单冻结（#13-1.5）：结果记录当时解析到的版本与指纹，样本集漂移可发现。
+                **(self.data.version_info(scope["dataset_id"], scope["version_id"])
+                   if hasattr(self.data, "version_info") else {}),
                 "finished_at": utc_now().isoformat()}
 
     def _value_snapshot(self, task, policy, samples, outcomes, result_id):

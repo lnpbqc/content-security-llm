@@ -97,6 +97,9 @@ class FakeBusinessDatabase:
         self.connections = 0
         self.queries = []
         self.unavailable = False
+        # 版本清单（#13-1.5）：(dataset_id, dsv或label) -> 版本行；dsv -> (dataset_id, [record_id])
+        self.versions = {}
+        self.manifests = {}
 
     def connect(self):
         """提供与 PyMySQL 连接一致的最小测试入口。"""
@@ -151,6 +154,14 @@ class FakeBusinessCursor:
             self.result = self.database.datasets.get(params[0])
         elif sql.startswith("SELECT id, payload FROM dataset_records"):
             self.result = sorted(self.database.records.get(params[0], []), key=lambda row: row["id"])
+        elif sql.startswith("SELECT version_id, label, manifest_hash, sample_count FROM dataset_versions"):
+            dataset_id, ref, _label = params
+            self.result = self.database.versions.get((dataset_id, ref))
+        elif sql.startswith("SELECT r.id, r.payload FROM dataset_version_items"):
+            owner, wanted = self.database.manifests.get(params[0], (None, []))
+            self.result = [dict(id=row["id"], payload=row["payload"])
+                           for row in sorted(self.database.records.get(owner, []), key=lambda r: r["id"])
+                           if row["id"] in wanted]
         else:
             raise AssertionError(sql)
 
@@ -720,7 +731,9 @@ def test_business_rows_are_ordered_and_all_fields_become_model_text(app_client):
     assert first_input["text"] == 'alpha: 第一条\nlanguage: zh\nzeta: {"a":1,"b":2}'
     assert len(FakeCompletionClient.calls) == 2
     assert business.queries[0][1] == (99,)
-    assert "ORDER BY id" in business.queries[1][0]
+    # 1.5 后第二个查询是版本清单解析（未命中则退回全量原件），第三个才是记录读取。
+    assert "dataset_versions" in business.queries[1][0]
+    assert "ORDER BY id" in business.queries[2][0]
     task_id = response.json()["data"]["task_id"]
     result_id = app.state.governance_service.repository.get_task(task_id)["result_id"]
     detail = client.get("/api/v1/data-governance/value-results/" + result_id,
@@ -1557,3 +1570,34 @@ def test_frontend_checklist_read_only_chain(app_client, name, scheme):
                and row["version_id"] == result["scope"]["version_id"] for row in rows)
     assert client.get(result_path, headers=headers(), params={"kind": "wrong"}).status_code == 400
     assert len(FakeCompletionClient.calls) == calls and business.connections == connections
+
+
+def test_samples_resolve_dsv_manifest():
+    """dsv 清单路径：按 items 读样本、绕过标签比对，并缓存清单指纹（#13-1.5）。"""
+    from service.governance_data import BusinessGovernanceData
+
+    business = FakeBusinessDatabase()
+    business.versions[(1, "dsv_000001")] = {
+        "version_id": "dsv_000001", "label": "v9.9.9", "manifest_hash": "mh-1", "sample_count": 2}
+    business.manifests["dsv_000001"] = (1, [1, 2])
+    data = BusinessGovernanceData(database=None, connection_factory=business.connect)
+    samples = data.samples({"dataset_id": 1, "version_id": "dsv_000001"})
+    assert [row["id"] for row in samples] == ["1", "2"]
+    assert samples[0]["version_id"] == "dsv_000001"
+    info = data.version_info(1, "dsv_000001")
+    assert info["manifest_hash"] == "mh-1"
+    assert info["version_label"] == "v9.9.9"
+
+
+def test_samples_legacy_label_path_without_version_table():
+    """业务库无版本表/无匹配行时退回旧语义：标签必须等于当前版本，读全部原件。"""
+    from service.governance_data import BusinessGovernanceData
+
+    business = FakeBusinessDatabase()
+    data = BusinessGovernanceData(database=None, connection_factory=business.connect)
+    samples = data.samples({"dataset_id": 1, "version_id": "v1.0.0"})
+    assert len(samples) == 3
+    assert data.version_info(1, "v1.0.0") == {}
+    import pytest
+    with pytest.raises(ValueError):
+        data.samples({"dataset_id": 1, "version_id": "v2.0.0"})

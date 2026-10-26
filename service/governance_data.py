@@ -42,6 +42,7 @@ class BusinessGovernanceData:
         """复用主存储连接；测试可注入模拟数据库连接。"""
         self.connection_factory = connection_factory or database.connect
         self.mock_samples = mock_samples
+        self._version_info: Dict[Any, Any] = {}
         self._names = {}
 
     def policy(self, kind: str, scheme_id: str) -> Dict[str, Any]:
@@ -79,7 +80,11 @@ class BusinessGovernanceData:
         raise ValueError("不支持的治理方案")
 
     def samples(self, scope: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """核对当前版本，并按原始记录 ID 顺序读取该数据集的全部样本。"""
+        """核对版本并读取样本：优先按版本清单（#13），无清单时退回全量原件。
+
+        scope.version_id 允许 dsv_xxxxxx（清单主键）或 v1.0.0（标签）两种写法，
+        根治历史上 dsv 与版本字符串互不认导致治理任务直接失败的问题。
+        """
         dataset_id = scope["dataset_id"]
         version_id = scope["version_id"]
         try:
@@ -89,13 +94,37 @@ class BusinessGovernanceData:
                     dataset = cursor.fetchone()
                     if dataset is None:
                         raise ValueError("数据集不存在")
-                    if dataset["version"] != version_id:
-                        raise ValueError("数据集版本不匹配")
-                    cursor.execute(
-                        "SELECT id, payload FROM dataset_records WHERE dataset_id = %s ORDER BY id",
-                        (dataset_id,),
-                    )
-                    rows = cursor.fetchall()
+                    version_row = None
+                    try:
+                        cursor.execute(
+                            "SELECT version_id, label, manifest_hash, sample_count FROM dataset_versions"
+                            " WHERE dataset_id = %s AND (version_id = %s OR label = %s)",
+                            (dataset_id, version_id, version_id),
+                        )
+                        version_row = cursor.fetchone()
+                    except Exception:
+                        version_row = None  # 业务库尚无版本表（旧环境）：退回标签比对
+                    if version_row is not None:
+                        cursor.execute(
+                            "SELECT r.id, r.payload FROM dataset_version_items i"
+                            " JOIN dataset_records r ON r.id = i.record_id"
+                            " WHERE i.version_id = %s ORDER BY i.id",
+                            (version_row["version_id"],),
+                        )
+                        rows = cursor.fetchall()
+                        self._version_info[(dataset_id, version_id)] = {
+                            "version_id": version_row["version_id"],
+                            "version_label": version_row["label"],
+                            "manifest_hash": version_row["manifest_hash"],
+                        }
+                    else:
+                        if dataset["version"] != version_id:
+                            raise ValueError("数据集版本不匹配")
+                        cursor.execute(
+                            "SELECT id, payload FROM dataset_records WHERE dataset_id = %s ORDER BY id",
+                            (dataset_id,),
+                        )
+                        rows = cursor.fetchall()
         except ValueError:
             raise
         except Exception as exc:
@@ -131,6 +160,11 @@ class BusinessGovernanceData:
             })
         self._names[(dataset_id, version_id)] = dataset["name"]
         return samples
+
+
+    def version_info(self, dataset_id: int, version_id: str) -> Dict[str, Any]:
+        """本次 samples() 解析出的版本清单信息（未走清单路径时为空 dict）。"""
+        return dict(self._version_info.get((dataset_id, version_id)) or {})
 
     def _mock_rows(self, dataset_id: int, version_id: str) -> List[Dict[str, Any]]:
         """仅为尚未入库的数据集提供有明确来源标记的固定联调记录。"""
