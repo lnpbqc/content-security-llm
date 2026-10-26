@@ -98,8 +98,9 @@ def test_catalog_defaults_validation_and_auth(context):
     assert client.post(BASE + "/script-tasks", headers=ADMIN,
                        json={**body, "script_id": "../arbitrary.py"}).status_code == 404
     for suffix in ("", "/metrics", "/artifacts", "/logs"):
-        assert client.get(BASE + "/tasks/" + task["id"] + suffix, headers=OTHER).status_code == 404
-    assert client.post(BASE + "/tasks/" + task["id"] + "/cancel", headers=OTHER).status_code == 404
+        assert client.get(BASE + "/tasks/" + task["id"] + suffix, headers=OTHER).status_code == 403
+    assert client.post(BASE + "/tasks/" + task["id"] + "/cancel", headers=OTHER).status_code == 403
+    assert client.get(BASE + "/tasks/" + "00000000-0000-0000-0000-000000000000", headers=OTHER).status_code == 404
 
 
 def test_incremental_events_and_final_unterminated_line(tmp_path):
@@ -154,7 +155,7 @@ emit({"type":"artifact", "filename":"nested/result.txt", "kind":"report"})
         response = client.get(download, headers=HEADERS)
         assert response.status_code == 200
         assert sha256(response.content).hexdigest() == artifact["sha256"]
-        assert client.get(download, headers=OTHER).status_code == 404
+        assert client.get(download, headers=OTHER).status_code == 403
 
 
 @pytest.mark.parametrize("body, expected", [

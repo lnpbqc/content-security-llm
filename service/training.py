@@ -10,6 +10,10 @@ class TrainingService:
     def get(self, task_id, token_hash):
         task = self.repository.get(task_id, token_hash)
         if task is None:
+            # 区分"不存在"与"存在但不属于你"：跨令牌访问报 403，避免假 404 误导排障。
+            if self.repository.get(task_id) is not None:
+                raise HTTPException(403, detail={"code": "training_task_forbidden",
+                                                 "message": "该训练任务属于另一个访问令牌，请切换为建单时使用的令牌"})
             raise HTTPException(404, detail={"code": "training_task_not_found", "message": "训练任务不存在"})
         return task
 

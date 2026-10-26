@@ -123,8 +123,8 @@ def test_auth_pagination_cancel_pending_and_isolation(training_client):
     assert client.get(BASE + "/tasks", headers=OTHER).json()["data"]["total"] == 0
     task_id = tasks[0]["id"]
     for suffix in ("", "/metrics", "/artifacts", "/artifacts/unknown/download"):
-        assert client.get(BASE + "/tasks/" + task_id + suffix, headers=OTHER).status_code == 404
-    assert client.post(BASE + "/tasks/" + task_id + "/cancel", headers=OTHER).status_code == 404
+        assert client.get(BASE + "/tasks/" + task_id + suffix, headers=OTHER).status_code == 403
+    assert client.post(BASE + "/tasks/" + task_id + "/cancel", headers=OTHER).status_code == 403
     canceled = client.post(BASE + "/tasks/" + task_id + "/cancel", headers=HEADERS).json()["data"]
     assert canceled["status"] == "canceled"
     assert client.post(BASE + "/tasks/" + task_id + "/cancel", headers=HEADERS).json()["data"]["status"] == "canceled"
@@ -339,7 +339,7 @@ def test_worker_real_subprocess_persists_metrics_downloads_and_no_query_mysql(tr
         response = client.get(path, headers=HEADERS)
         assert response.status_code == 200 and len(response.content) == artifact["size"]
         assert sha256(response.content).hexdigest() == artifact["sha256"]
-        assert client.get(path, headers=OTHER).status_code == 404
+        assert client.get(path, headers=OTHER).status_code == 403
     assert source.calls == 1
     assert "插件日志" in (repository.directory(task["id"]) / "stderr.log").read_text(encoding="utf-8")
 
