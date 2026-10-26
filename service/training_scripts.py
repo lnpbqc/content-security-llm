@@ -32,6 +32,24 @@ class CifarParameters(BaseModel):
         return self
 
 
+class FashionInputs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    download: StrictBool = True
+
+
+class FashionParameters(BaseModel):
+    """灰度小图 CPU 分钟级训练参数；样本按类等额抽样，合计不设上限（训练/验证来自不同官方切分）。"""
+
+    model_config = ConfigDict(extra="forbid", strict=True, allow_inf_nan=False)
+    epochs: int = Field(default=3, ge=1, le=20)
+    batch_size: int = Field(default=128, ge=1, le=1024)
+    learning_rate: float = Field(default=0.001, gt=0, le=1)
+    seed: int = Field(default=42, ge=0, le=2**32 - 1)
+    device: Literal["cuda", "cpu"] = "cpu"
+    train_samples: int = Field(default=5000, ge=100, le=60000)
+    validation_samples: int = Field(default=1000, ge=100, le=10000)
+
+
 @dataclass(frozen=True)
 class ScriptDefinition:
     name: str
@@ -66,6 +84,10 @@ SCRIPTS = {
     "cifar100-cnn": ScriptDefinition(
         "CIFAR-100 小型 CNN", "真实百分类训练示例；固定 CNN/AdamW，使用独立数据缓存。",
         PROJECT_ROOT / "training_scripts" / "cifar100.py", CifarInputs, CifarParameters),
+    "fashion-cnn": ScriptDefinition(
+        "FashionMNIST 小型 CNN（真权重演示）",
+        "真实灰度图片十分类；约 8 MB 数据、两层卷积，CPU 分钟级产出真实 loss/准确率曲线与可下载的 .pt 权重。",
+        PROJECT_ROOT / "training_scripts" / "fashion_cnn.py", FashionInputs, FashionParameters),
 }
 
 
