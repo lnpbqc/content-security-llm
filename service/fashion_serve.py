@@ -56,8 +56,10 @@ def _candidate_weights(explicit: Path | None) -> list[Path]:
     if explicit is not None:
         return [explicit]
     runs = REPO_ROOT / "db" / "training-runs"
-    candidates = sorted(runs.glob("*/best.pt"), key=lambda path: path.stat().st_mtime, reverse=True)
-    return candidates + sorted(runs.glob("*/last.pt"), key=lambda path: path.stat().st_mtime, reverse=True)
+    # worker 把产物写在 <任务ID>/outputs/ 下，老任务可能直接落在任务目录，两种都找。
+    candidates = [path for pattern in ("*/best.pt", "*/outputs/best.pt", "*/last.pt",
+                                       "*/outputs/last.pt") for path in runs.glob(pattern)]
+    return sorted(candidates, key=lambda path: path.stat().st_mtime, reverse=True)
 
 
 def load_bundle(path: Path) -> dict:
