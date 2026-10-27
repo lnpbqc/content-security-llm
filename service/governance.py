@@ -309,7 +309,9 @@ class GovernanceService:
                          "version_id": sample["version_id"], "revision_id": sample["revision_id"],
                          "text": sample["text"], "language": sample["language"],
                          "primary_type": findings[0]["type"] if findings else "",
-                         "status": "待处理" if findings or output["status"] == "unavailable" else "已处理",
+                         # 无 findings 的正常样本不占“已处理”桶（“已处理”只表示异常处置闭环）；
+                         # 正常样本不进入异常样本明细，仅在快照中保留以支撑有效检测数统计。
+                         "status": "待处理" if findings or output["status"] == "unavailable" else "正常",
                          "findings": [
                              {key: finding[key] for key in ("type", "field", "reason", "quote", "ruleId")}
                              for finding in findings],

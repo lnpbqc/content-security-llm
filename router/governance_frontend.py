@@ -116,7 +116,9 @@ def risk_overview(request: Request, service: GovernanceService = Depends(get_ser
         "definitions": ["仅统计当前访问令牌产生的结果；同一数据集版本取最近一次已保存分析，不累加重复分析。",
                         "风险等级和待复核数量是模型建议，本服务不执行人工复核。"],
         "records": [{"result_id": row["id"], "dataset_name": row["dataset_name"],
-                     "version_id": row["scope"]["version_id"], "valid_count": row["valid_count"],
+                     "version_id": row["scope"]["version_id"],
+                     "version_label": row.get("version_label") or row["scope"]["version_id"],
+                     "valid_count": row["valid_count"],
                      "risk_count": row["risk_count"], "finished_at": row["finished_at"]}
                     for row in summaries],
     })

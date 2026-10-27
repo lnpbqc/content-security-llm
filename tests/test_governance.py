@@ -509,8 +509,10 @@ def test_three_tasks_publish_read_only_results_and_preserve_invoke(app_client):
         source_reads = business.connections
         samples = client.get(base + "/" + result_id + "/samples", headers=headers(),
                              params={"page": 1, "page_size": 2}).json()["data"]
-        assert samples["total"] == 3
-        assert len(samples["items"]) == 2
+        # 异常样本列表只含命中规则的样本：anomaly 场景仅 id 3 异常（1 条），其余类型为 3 条。
+        expected_total = 1 if name == "anomaly" else 3
+        assert samples["total"] == expected_total
+        assert len(samples["items"]) == min(2, expected_total)
         if name == "value":
             assert detail["valid_count"] == 3
             assert detail["mean_score"] == 80
@@ -1592,13 +1594,16 @@ def test_frontend_checklist_read_only_chain(app_client, name, scheme):
     if name != "value":
         assert client.get(base, headers=headers(), params=params).json()["data"] == [result]
     rows = []
-    for page in (1, 2, 3):
+    # anomaly 场景仅 1 条样本命中（id 3），total/total_pages 为 1；value、risk 为 3 条 3 页。
+    expected_total = 1 if name == "anomaly" else 3
+    for page in range(1, expected_total + 1):
         saved = client.get(result_path + "/samples", headers=headers(),
                            params={"kind": kind, "page": page, "page_size": 1}).json()["data"]
         assert saved["page"] == page and saved["page_size"] == 1
-        assert saved["total"] == 3 and saved["total_pages"] == 3
+        assert saved["total"] == expected_total and saved["total_pages"] == expected_total
         rows.extend(saved["items"])
-    assert {row["id"] for row in rows} == {"1", "2", "3"} and len(rows) == 3
+    expected_ids = {"3"} if name == "anomaly" else {"1", "2", "3"}
+    assert {row["id"] for row in rows} == expected_ids and len(rows) == expected_total
     if name == "risk":
         exported = client.post(result_path + "/export", headers=headers(),
                                params={"kind": kind}, json={}).json()["data"]

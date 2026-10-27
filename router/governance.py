@@ -290,8 +290,11 @@ def anomaly_samples(request: Request, result_id: str, page: int = Query(1, ge=1)
                     type: str = "", status: str = "",
                     service: GovernanceService = Depends(get_service),
                     token_hash: str = Depends(require_token)):
-    """按关键词、异常类型和状态筛选已保存样本并分页。"""
+    """按关键词、异常类型和状态筛选已保存的异常样本并分页。"""
     rows = _get_result(service, result_id, "governance-anomaly", token_hash)["samples"]
+    # 异常样本明细只包含命中规则的异常样本；正常样本（无 findings）不进入列表，
+    # 分页 total 与汇总 anomaly_count 保持同一口径，避免出现“全部 3 条却共 12 条”。
+    rows = [row for row in rows if row["findings"]]
     rows = [row for row in rows if (not keyword or keyword in row["id"] + row["text"]) and
             (not type or any(finding["type"] == type for finding in row["findings"])) and
             (not status or row["status"] == status)]
@@ -304,7 +307,8 @@ def anomaly_sample(request: Request, result_id: str, sample_id: str,
                    token_hash: str = Depends(require_token)):
     """只读查询一条异常样本及其发现和候选变更。"""
     rows = _get_result(service, result_id, "governance-anomaly", token_hash)["samples"]
-    row = next((row for row in rows if row["id"] == sample_id), None)
+    # 正常样本（无 findings）不属于异常结果，按异常样本查询时返回 404。
+    row = next((row for row in rows if row["id"] == sample_id and row["findings"]), None)
     if row is None:
         raise HTTPException(404, detail={"code": "sample_not_found", "message": "样本不存在"})
     return success(request, row)
