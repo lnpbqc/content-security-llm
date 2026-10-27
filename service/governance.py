@@ -235,11 +235,14 @@ class GovernanceService:
     def _base_summary(self, task: Dict[str, Any], result_id: str) -> Dict[str, Any]:
         """生成三类结果共用的 ID、范围和完成时间字段。"""
         scope = task["scope"]
+        info = (self.data.version_info(scope["dataset_id"], scope["version_id"])
+                if hasattr(self.data, "version_info") else {})
         return {"id": result_id, "task_id": task["id"], "scope": scope,
                 "dataset_name": self.data.dataset_name(scope["dataset_id"], scope["version_id"]),
                 # 清单冻结（#13-1.5）：结果记录当时解析到的版本与指纹，样本集漂移可发现。
-                **(self.data.version_info(scope["dataset_id"], scope["version_id"])
-                   if hasattr(self.data, "version_info") else {}),
+                **info,
+                # version_id 是清单主键（dsv_xxxxxx），version_label 才是页面展示的版本号。
+                "version_label": info.get("version_label") or scope["version_id"],
                 "finished_at": utc_now().isoformat()}
 
     def _value_snapshot(self, task, policy, samples, outcomes, result_id):
@@ -273,8 +276,7 @@ class GovernanceService:
         bins = [{"id": str(i), "label": "{}–{}".format(i * 20, (i + 1) * 20),
                  "count": sum(1 for row in valid if min(4, int(row["score"] // 20)) == i)} for i in range(5)]
         summary = self._base_summary(task, result_id)
-        summary.update({"version_label": task["scope"]["version_id"],
-                        "language_name": task["scope"]["language"], "scheme_name": policy["name"],
+        summary.update({"language_name": task["scope"]["language"], "scheme_name": policy["name"],
                         "mean_score": round(sum(row["score"] for row in valid) / len(valid), 1) if valid else None,
                         "valid_count": len(valid), "high_count": sum(row["tier"] == "high" for row in valid),
                         "unavailable_count": len(rows) - len(valid), "failed_count": failed,
@@ -320,7 +322,7 @@ class GovernanceService:
         valid = len(rows) - unavailable
         anomaly_count = sum(bool(row["findings"]) for row in rows)
         summary = self._base_summary(task, result_id)
-        summary.update({"version_label": task["scope"]["version_id"], "valid_count": valid,
+        summary.update({"valid_count": valid,
                         "failed_count": failed, "unavailable_count": unavailable,
                         "anomaly_count": anomaly_count,
                         "ratio": round(anomaly_count / valid * 100, 1) if valid else 0,

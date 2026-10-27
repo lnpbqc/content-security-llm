@@ -1627,6 +1627,26 @@ def test_samples_resolve_dsv_manifest():
     assert info["version_label"] == "v9.9.9"
 
 
+def test_result_summary_reports_readable_version_label(app_client):
+    """结果保留清单主键，version_label 用人类可读版本号（页面展示后者）。"""
+    app, client, _, business = app_client
+    business.versions[(3, "dsv_000003")] = {
+        "version_id": "dsv_000003", "label": "v1.6.0", "manifest_hash": "mh-3", "sample_count": 3}
+    business.manifests["dsv_000003"] = (3, [1, 2, 3])
+    response = client.post("/api/v1/tasks", headers=headers(), json={
+        "kind": "governance-value", "name": "测试任务",
+        "input": {"dataset_id": 3, "version_id": "dsv_000003",
+                  "language": "all", "scheme_id": "general-v1"}})
+    assert response.status_code == 200, response.text
+    service = app.state.governance_service
+    assert service.run_once()
+    task = service.repository.get_task(response.json()["data"]["task_id"])
+    summary = service.repository.get_result_summary(
+        task["result_id"], task["token_hash"], "governance-value")["summary"]
+    assert summary["version_id"] == "dsv_000003"
+    assert summary["version_label"] == "v1.6.0"
+
+
 def test_samples_legacy_label_path_without_version_table():
     """业务库无版本表/无匹配行时退回旧语义：标签必须等于当前版本，读全部原件。"""
     from service.governance_data import BusinessGovernanceData
