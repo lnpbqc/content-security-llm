@@ -95,6 +95,7 @@ class BusinessGovernanceData:
                     if dataset is None:
                         raise ValueError("数据集不存在")
                     version_row = None
+                    manifest_available = True
                     try:
                         cursor.execute(
                             "SELECT version_id, label, manifest_hash, sample_count FROM dataset_versions"
@@ -103,7 +104,8 @@ class BusinessGovernanceData:
                         )
                         version_row = cursor.fetchone()
                     except Exception:
-                        version_row = None  # 业务库尚无版本表（旧环境）：退回标签比对
+                        manifest_available = False  # 业务库尚无版本表（旧环境）：退回标签比对
+                        version_row = None
                     if version_row is not None:
                         cursor.execute(
                             "SELECT r.id, r.payload FROM dataset_version_items i"
@@ -119,7 +121,9 @@ class BusinessGovernanceData:
                         }
                     else:
                         if dataset["version"] != version_id:
-                            raise ValueError("数据集版本不匹配")
+                            raise ValueError("数据集版本不匹配：请求 {}，{}".format(
+                                version_id, self._available_versions(cursor, dataset_id, dataset,
+                                                                   manifest_available)))
                         cursor.execute(
                             "SELECT id, payload FROM dataset_records WHERE dataset_id = %s ORDER BY id",
                             (dataset_id,),
@@ -165,6 +169,16 @@ class BusinessGovernanceData:
     def version_info(self, dataset_id: int, version_id: str) -> Dict[str, Any]:
         """本次 samples() 解析出的版本清单信息（未走清单路径时为空 dict）。"""
         return dict(self._version_info.get((dataset_id, version_id)) or {})
+
+    def _available_versions(self, cursor, dataset_id: int, dataset: Dict[str, Any],
+                            manifest_available: bool) -> str:
+        """列出该数据集实际可用的版本，供版本不匹配时说明差异。"""
+        if manifest_available:
+            cursor.execute("SELECT label FROM dataset_versions WHERE dataset_id = %s", (dataset_id,))
+            labels = [row["label"] for row in cursor.fetchall()]
+            if labels:
+                return "可用版本 {}".format("、".join(labels))
+        return "当前版本 {}".format(dataset["version"])
 
     def _mock_rows(self, dataset_id: int, version_id: str) -> List[Dict[str, Any]]:
         """仅为尚未入库的数据集提供有明确来源标记的固定联调记录。"""

@@ -11,6 +11,7 @@ from router.dependencies import require_token
 from schemas.governance import GovernanceResponse, RiskWeightAccuracy
 from service.governance import GovernanceService, ModelNotConfiguredError
 from utils.time import utc_now
+from utils.worker_status import stale_hint
 
 
 router = APIRouter(prefix="/api/v1", tags=["governance"], dependencies=[Depends(require_token)])
@@ -69,8 +70,11 @@ def success(request: Request, data: Any) -> Dict[str, Any]:
 
 def _task_public(task: Dict[str, Any], service: GovernanceService) -> Dict[str, Any]:
     """将内部任务记录映射为对应页面的任务字段。"""
+    message = task["error_message"]
+    if message:
+        message = message + stale_hint(service.repository.database.data_dir)
     common = {"status": task["status"], "created_at": task["created_at"],
-              "result_id": task["result_id"], "error_message": task["error_message"]}
+              "result_id": task["result_id"], "error_message": message}
     if task["kind"] == "governance-value":
         return {"task_id": task["id"], "name": task["name"], **common}
     if task["kind"] == "governance-anomaly":

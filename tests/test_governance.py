@@ -19,6 +19,7 @@ from db.database import Connection, Database
 from llm.governance_outputs import AnomalyFindingOutput, RiskFindingOutput, ValueDimensionOutput
 from llm.outputs import AnomalyFinding, SemanticRiskFinding, ValueScoreDimension
 from main import create_app
+from utils import worker_status
 from utils.time import utc_now
 
 
@@ -157,6 +158,11 @@ class FakeBusinessCursor:
         elif sql.startswith("SELECT version_id, label, manifest_hash, sample_count FROM dataset_versions"):
             dataset_id, ref, _label = params
             self.result = self.database.versions.get((dataset_id, ref))
+        elif sql.startswith("SELECT label FROM dataset_versions"):
+            dataset_id = params[0]
+            labels = sorted({row["label"] for (owner, _ref), row in self.database.versions.items()
+                             if owner == dataset_id and row.get("label")})
+            self.result = [{"label": label} for label in labels]
         elif sql.startswith("SELECT r.id, r.payload FROM dataset_version_items"):
             owner, wanted = self.database.manifests.get(params[0], (None, []))
             self.result = [dict(id=row["id"], payload=row["payload"])
@@ -766,6 +772,38 @@ def test_source_failures_mark_pending_task_failed_without_model_call(app_client,
     assert task["result_id"] is None
     assert task["error_message"]
     assert FakeCompletionClient.calls == []
+
+
+def test_failed_task_reports_stale_governance_worker(app_client):
+    """worker 仍在跑旧代码时，失败原因后附带重启提示。"""
+    app, client, _, business = app_client
+    service = app.state.governance_service
+    business.datasets[3]["version"] = "v2"
+    status_path = worker_status.worker_dir(service.repository.database.data_dir) / "worker.status.json"
+    status_path.parent.mkdir(parents=True, exist_ok=True)
+    status_path.write_text(json.dumps(
+        {"pid": 1, "started_at": "2026-10-27T00:00:00+00:00",
+         "sources": {"service/governance_data.py": "0" * 16}}, ensure_ascii=False), encoding="utf-8")
+    created = create(client, "governance-value", "general-v1")
+    assert service.run_once()
+    task = client.get("/api/v1/tasks/" + created["task_id"],
+                      params={"kind": "governance-value"}, headers=headers()).json()["data"]
+    assert task["status"] == "failed"
+    assert "数据集版本不匹配" in task["error_message"]
+    assert "请重启 gov-worker" in task["error_message"]
+
+
+def test_failed_task_without_stale_worker_keeps_plain_reason(app_client):
+    """worker 代码未过期时，失败原因保持原样。"""
+    app, client, _, business = app_client
+    service = app.state.governance_service
+    business.datasets[3]["version"] = "v2"
+    created = create(client, "governance-value", "general-v1")
+    assert service.run_once()
+    task = client.get("/api/v1/tasks/" + created["task_id"],
+                      params={"kind": "governance-value"}, headers=headers()).json()["data"]
+    assert task["status"] == "failed"
+    assert task["error_message"] == "ValueError: 数据集版本不匹配：请求 v1.0.0，当前版本 v2"
 
 
 def test_governance_uses_shared_mysql_connection(app_client):

@@ -1,6 +1,7 @@
 """在独立进程中持续领取并执行 SQLite 中的治理任务。"""
 
 import argparse
+import os
 import time
 
 from config import Settings
@@ -11,6 +12,8 @@ from llm.models import ModelManager
 from service.governance import GovernanceService
 from service.governance_data import BusinessGovernanceData
 from utils.locking import exclusive_lock
+from utils.time import utc_now
+from utils.worker_status import write_status
 
 
 def main() -> None:
@@ -31,6 +34,8 @@ def main() -> None:
     )
     with exclusive_lock(database.data_dir / "governance-worker" / "worker.lock",
                         "治理 worker 已运行，只允许单实例"):
+        # 登记本次加载的源码指纹：改代码后接口据此提示 worker 仍在跑旧版本。
+        write_status(database.data_dir, os.getpid(), utc_now().isoformat())
         repository.recover_running()
         while True:
             worked = service.run_once()

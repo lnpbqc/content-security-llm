@@ -13,11 +13,20 @@ from router.governance import get_service, success
 from schemas.governance import (GovernanceResponse, MultilingualSamplePage,
                                 MultilingualSummary, MultilingualTask)
 from service.governance import GovernanceService
+from utils.worker_status import stale_hint
 
 
 KIND = "ethnic-multilingual"
 router = APIRouter(prefix="/api/v1/analysis/ethnic-multilingual", tags=["analysis"],
                    dependencies=[Depends(require_token)])
+
+
+def _error_message(task: dict, service: GovernanceService) -> str | None:
+    """失败原因后补上 worker 过期提示（治理 worker 不热更新代码）。"""
+    message = task["error_message"]
+    if message:
+        message = message + stale_hint(service.repository.database.data_dir)
+    return message
 
 
 class Scope(BaseModel):
@@ -83,7 +92,7 @@ def create_task(request: Request, payload: TaskCreate,
     return success(request, {"task_id": task["id"], "status": task["status"],
                              "result_id": task["result_id"], "input": task["scope"],
                              "model_id": task["model_id"], "created_at": task["created_at"],
-                             "error_message": task["error_message"]})
+                             "error_message": _error_message(task, service)})
 
 
 @router.get("/tasks/{task_id}", response_model=GovernanceResponse[MultilingualTask], response_model_exclude_unset=True)
@@ -96,7 +105,7 @@ def get_task(request: Request, task_id: str,
     return success(request, {"task_id": task["id"], "status": task["status"],
                              "result_id": task["result_id"], "input": task["scope"],
                              "model_id": task["model_id"], "created_at": task["created_at"],
-                             "error_message": task["error_message"]})
+                             "error_message": _error_message(task, service)})
 
 
 @router.get("/results/latest", response_model=GovernanceResponse[MultilingualSummary | None],
