@@ -5,6 +5,7 @@
 所有 loss、accuracy 均来自真实前向与反向计算，checkpoint 为真实 state_dict。
 """
 import argparse
+import csv
 import json
 import math
 import time
@@ -41,6 +42,19 @@ def make_data(samples: int, seed: int):
     return features[shuffle], labels[shuffle]
 
 
+def load_csv(data_dir: Path, filename: str):
+    """从 data_dir 读两列特征 + 一列标签的 CSV；文件不存在返回 None（兜底脚本自造）。"""
+    path = data_dir / filename
+    if not path.exists():
+        return None
+    with path.open("r", encoding="utf-8", newline="") as stream:
+        rows = list(csv.reader(stream))
+    body = rows[1:]
+    features = torch.tensor([[float(r[0]), float(r[1])] for r in body], dtype=torch.float32)
+    labels = torch.tensor([int(r[2]) for r in body], dtype=torch.long)
+    return features, labels
+
+
 model = nn.Sequential(
     nn.Linear(2, int(params["hidden_size"])),
     nn.Tanh(),
@@ -49,8 +63,20 @@ model = nn.Sequential(
 criterion = nn.CrossEntropyLoss()
 optimizer = torch.optim.Adam(model.parameters(), lr=float(params["learning_rate"]))
 torch.manual_seed(int(params["seed"]))
-train_x, train_y = make_data(int(params["samples"]), int(params["seed"]))
-valid_x, valid_y = make_data(256, int(params["seed"]) + 10_000)
+# 数据路由：前端选的数据集版本决定 data_dir（training-data/mini-mlp/{data_version}/）。
+# 该目录下有 train.csv/valid.csv 就用台账里的真实数据；没有则兜底脚本自造，兼容历史任务。
+data_dir = Path(config.get("data_dir") or ".")
+train_loaded = load_csv(data_dir, "train.csv")
+if train_loaded is not None:
+    train_x, train_y = train_loaded
+    print(f"从 data_dir 加载训练集 {train_x.shape[0]} 行 @ {data_dir}", flush=True)
+else:
+    train_x, train_y = make_data(int(params["samples"]), int(params["seed"]))
+valid_loaded = load_csv(data_dir, "valid.csv")
+if valid_loaded is not None:
+    valid_x, valid_y = valid_loaded
+else:
+    valid_x, valid_y = make_data(256, int(params["seed"]) + 10_000)
 epochs = int(params["epochs"])
 steps_per_epoch = max(1, math.ceil(train_x.shape[0] / BATCH))
 best_loss = float("inf")

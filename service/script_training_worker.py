@@ -85,11 +85,15 @@ def run_script_task(repository, task, cancel_timeout=30):
         output.mkdir()
         config = task["config"]
         (directory / "source.py").write_text(config["python_source"], encoding="utf-8", newline="\n")
+        # 数据缓存按 script_id + 数据集版本分层：training-data/{script_id}/{data_version}/
+        # 前端选哪个数据集版本，脚本就从哪个子目录读；缺省版本落到 default 兼容历史任务。
+        data_version = (config.get("data_version") or "default").strip("/\\") or "default"
+        data_root = repository.root.parent / "training-data" / config["script_id"] / data_version
         launch = {"task_id": task["id"], "script_id": config["script_id"], "inputs": config["inputs"],
                   "parameters": config["parameters"], "output_dir": str(output),
                   "events_path": str(directory / "events.jsonl"),
                   "cancel_path": str(directory / "cancel.request"),
-                  "data_dir": str(repository.root.parent / "training-data" / config["script_id"])}
+                  "data_dir": str(data_root)}
         (directory / "config.json").write_text(encode(launch), encoding="utf-8")
         for filename, kind in (("source.py", "source"), ("config.json", "metadata")):
             repository.artifact(task["id"], filename, kind)

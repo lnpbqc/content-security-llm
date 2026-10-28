@@ -45,7 +45,7 @@ class FashionParameters(BaseModel):
     batch_size: int = Field(default=128, ge=1, le=1024)
     learning_rate: float = Field(default=0.001, gt=0, le=1)
     seed: int = Field(default=42, ge=0, le=2**32 - 1)
-    device: Literal["cuda", "cpu"] = "cpu"
+    device: Literal["auto", "cuda", "cpu"] = "auto"
     train_samples: int = Field(default=5000, ge=100, le=60000)
     validation_samples: int = Field(default=1000, ge=100, le=10000)
 
@@ -57,9 +57,13 @@ class ScriptDefinition:
     path: Path
     inputs: type[BaseModel]
     parameters: type[BaseModel]
+    # 配套数据集标识：与 8000 台账数据集 metadata.dataset_key 对应；前端选数据集后按它过滤脚本下拉。
+    # "synthetic" 表示脚本自己造合成数据，不依赖台账里的真实数据集。
+    dataset_key: str = ""
 
     def public(self, script_id):
         return {"id": script_id, "name": self.name, "description": self.description,
+                "dataset_key": self.dataset_key,
                 "inputs_schema": self.inputs.model_json_schema(),
                 "parameters_schema": self.parameters.model_json_schema()}
 
@@ -80,14 +84,17 @@ class MiniParameters(BaseModel):
 SCRIPTS = {
     "mini-mlp": ScriptDefinition(
         "迷你 MLP（演示链路）", "合成二维数据的真实小网络训练；秒级完成，用于验证脚本任务、事件与产物链路。",
-        PROJECT_ROOT / "training_scripts" / "mini_mlp.py", MiniInputs, MiniParameters),
+        PROJECT_ROOT / "training_scripts" / "mini_mlp.py", MiniInputs, MiniParameters,
+        dataset_key="synthetic"),
     "cifar100-cnn": ScriptDefinition(
         "CIFAR-100 小型 CNN", "真实百分类训练示例；固定 CNN/AdamW，使用独立数据缓存。",
-        PROJECT_ROOT / "training_scripts" / "cifar100.py", CifarInputs, CifarParameters),
+        PROJECT_ROOT / "training_scripts" / "cifar100.py", CifarInputs, CifarParameters,
+        dataset_key="cifar100"),
     "fashion-cnn": ScriptDefinition(
         "FashionMNIST 小型 CNN（真权重演示）",
         "真实灰度图片十分类；约 8 MB 数据、两层卷积，CPU 分钟级产出真实 loss/准确率曲线与可下载的 .pt 权重。",
-        PROJECT_ROOT / "training_scripts" / "fashion_cnn.py", FashionInputs, FashionParameters),
+        PROJECT_ROOT / "training_scripts" / "fashion_cnn.py", FashionInputs, FashionParameters,
+        dataset_key="fashion-mnist"),
 }
 
 
@@ -111,4 +118,5 @@ def prepare_script_task(payload):
         raise HTTPException(422, detail={"code": "invalid_script_configuration", "message": message}) from exc
     return {"runner": "script", "name": payload.name, "script_id": payload.script_id,
             "inputs": inputs, "parameters": parameters,
+            "data_version": payload.data_version,
             "python_source": script.path.read_text(encoding="utf-8")}

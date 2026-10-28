@@ -11,6 +11,9 @@ class ScriptTrainingCreate(BaseModel):
     script_id: str = Field(min_length=1, max_length=100)
     inputs: dict[str, JsonValue] = Field(default_factory=dict)
     parameters: dict[str, JsonValue] = Field(default_factory=dict)
+    # 数据集版本（来自 8000 台账）；worker 会把它作为 training-data/{script_id}/{data_version}/ 的子目录，
+    # 让"前端选哪个数据集版本"真正决定脚本读哪份数据快照。缺省时落到 default 子目录（兼容历史任务）。
+    data_version: str | None = Field(default=None, min_length=1, max_length=100)
 
     @field_validator("name", "script_id")
     @classmethod
@@ -35,6 +38,9 @@ class ScriptCatalogEntry(BaseModel):
     id: str
     name: str
     description: str
+    # 配套数据集标识；前端选数据集后按它过滤脚本下拉。必须在 response_model 里声明，
+    # 否则 FastAPI 序列化时会把 public() 返回的 dataset_key 丢弃。
+    dataset_key: str = ""
     inputs_schema: dict[str, JsonValue]
     parameters_schema: dict[str, JsonValue]
 

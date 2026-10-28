@@ -91,9 +91,13 @@ def main():
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    if params["device"] == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("请求 CUDA，但本机 GPU/CUDA 不可用；不会自动切换 CPU")
-    device = torch.device(params["device"])
+    device_name = params["device"]
+    if device_name == "auto":
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    else:
+        if device_name == "cuda" and not torch.cuda.is_available():
+            raise RuntimeError("请求 CUDA，但本机 GPU/CUDA 不可用；不会自动切换 CPU")
+        device = torch.device(device_name)
     if device.type == "cuda":
         torch.cuda.manual_seed_all(seed)
     # 小型示例不使用 DataLoader 子进程，便于独立运行和及时取消。
