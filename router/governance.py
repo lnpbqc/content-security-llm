@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from router.dependencies import require_token
 from schemas.governance import GovernanceResponse, RiskWeightAccuracy
 from service.governance import GovernanceService, ModelNotConfiguredError
+from llm.models import ModelNotFoundError
 from utils.time import utc_now
 from utils.worker_status import stale_hint
 
@@ -75,6 +76,18 @@ def _task_public(task: Dict[str, Any], service: GovernanceService) -> Dict[str, 
         message = message + stale_hint(service.repository.database.data_dir)
     common = {"status": task["status"], "created_at": task["created_at"],
               "result_id": task["result_id"], "error_message": message}
+    # 三类任务共用保存的模型标识，避免历史任务展示当前治理配置中的模型。
+    model_id = task.get("model_id")
+    model_version = task.get("model_version")
+    model_name = None
+    if model_id:
+        try:
+            model = service.manager.get_model(model_id)
+            if model.upstream_model_id == model_version:
+                model_name = model.name
+        except ModelNotFoundError:
+            pass
+    common.update(model_id=model_id, model_name=model_name, model_version=model_version)
     if task["kind"] == "governance-value":
         return {"task_id": task["id"], "name": task["name"], **common}
     if task["kind"] == "governance-anomaly":
