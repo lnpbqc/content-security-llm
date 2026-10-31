@@ -158,11 +158,16 @@ class BusinessGovernanceData:
                 "id": sample_id, "dataset_id": dataset_id, "version_id": version_id,
                 "revision_id": "{}:{}".format(version_id, sample_id),
                 "text": self._record_text({key: value for key, value in payload.items()
-                                           if key != "reference_risk_level"}),
+                                           if key not in {"reference_risk_level", "reference_value_tier", "reference_is_anomaly"}}),
                 "language": language if isinstance(language, str) and language else "unknown",
                 "metadata": payload,
             })
         self._names[(dataset_id, version_id)] = dataset["name"]
+        language_filter = scope.get("language", "all")
+        if language_filter != "all":
+            samples = [sample for sample in samples if sample["language"] == language_filter]
+            if not samples:
+                raise ValueError("所选语种没有可分析的样本")
         return samples
 
 

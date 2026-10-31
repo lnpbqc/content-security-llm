@@ -10,6 +10,7 @@ from db.governance import GovernanceRepository
 from db.governance_config import GovernanceConfigRepository
 from llm.governance_outputs import AnomalySampleOutput, MultilingualSampleOutput, RiskSampleOutput, ValueSampleOutput
 from llm.models import InvocationError, ModelManager, ModelNotFoundError
+from llm.structured_output import StructuredOutputValidationError
 from service.governance_data import BusinessGovernanceData
 from service.multilingual_semantic import build_snapshot
 from utils.time import utc_now
@@ -100,9 +101,23 @@ class GovernanceService:
                 if ("reference_risk_level" in sample["metadata"] and
                         sample["metadata"]["reference_risk_level"] not in REFERENCE_RISK_LEVELS):
                     raise ValueError("样本 {} 的标准风险档位无效".format(sample["id"]))
+        if kind in {"governance-value", "governance-anomaly"}:
+            field = "reference_value_tier" if kind == "governance-value" else "reference_is_anomaly"
+            for sample in samples:
+                ref = sample["metadata"].get(field)
+                if ref is not None and ((not isinstance(ref, str) or ref not in {"high", "medium", "low"})
+                                        if kind == "governance-value" else type(ref) is not bool):
+                    raise ValueError("样本 {} 的 {} 人工标注无效".format(sample["id"], field))
         outcomes = self.repository.sample_outcomes(task["id"])
         for sample in samples:
             if sample["id"] in outcomes:
+                continue
+            if kind == "governance-risk" and not self._risk_text(sample).strip():
+                self.repository.save_sample(task["id"], sample["id"], {
+                    "sampleId": sample["id"], "sampleRevisionId": sample["revision_id"],
+                    "status": "unassessable", "findings": [], "reviewRecommended": True,
+                    "unassessableReason": "text 正文字段缺失、为空或不是文本",
+                })
                 continue
             prompt = self._model_input(kind, sample, policy)
             try:
@@ -117,15 +132,22 @@ class GovernanceService:
                 output = parsed.model_dump(mode="json")
                 self.repository.save_sample(task["id"], sample["id"], output)
             except InvocationError as exc:
-                self.repository.save_sample(task["id"], sample["id"], None, exc.code)
+                detail = {"error_detail": str(exc), "sample_id": sample["id"], "model_id": task["model_id"], **getattr(exc, "details", {})} if kind in {"governance-risk", "governance-value", "governance-anomaly"} else None
+                self.repository.save_sample(task["id"], sample["id"], detail, exc.code)
         outcomes = self.repository.sample_outcomes(task["id"])
         if (samples and all(outcomes[s["id"]]["status"] == "error" for s in samples) and
-                not (kind == "governance-risk" and
-                     any("reference_risk_level" in s["metadata"] for s in samples))):
+                not (kind in {"governance-risk", "governance-value", "governance-anomaly"} and
+                     any(s["metadata"].get({"governance-risk": "reference_risk_level", "governance-value": "reference_value_tier", "governance-anomaly": "reference_is_anomaly"}[kind]) is not None for s in samples))):
             self.repository.fail(task["id"], "所有样本的模型调用或业务校验均失败")
             return
         result_id = str(uuid4())
         summary, public_samples = self._snapshot(task, policy, samples, outcomes, result_id)
+        if kind in {"governance-value", "governance-anomaly"}:
+            field = "reference_value_tier" if kind == "governance-value" else "reference_is_anomaly"
+            summary["evaluation_contract"] = "governance-reference-v1"
+            summary["reference_annotations"] = {s["id"]: s["metadata"].get(field) for s in samples}
+            if kind == "governance-value":
+                summary["evaluation_policy"] = {key: policy[key] for key in ("dimensions", "high_threshold", "medium_threshold")}
         if any(sample["id"].startswith("mock-") and sample["metadata"].get("is_mock") is True
                for sample in samples):
             summary["data_source"] = "mock"
@@ -142,26 +164,40 @@ class GovernanceService:
                                      + ("重点解释语义权重。" if policy["analysis_mode"] == "semantic_weighting"
                                         else "重点解释风险分层依据。"))}
         if kind == "governance-value":
-            return {"sample_id": sample["id"], "text": sample["text"],
+            return {"sample_id": sample["id"], "text": sample.get("metadata", {}).get("text", sample["text"]),
+                    "instructions": "每个评分维度都必须给出理由和至少一段正文中逐字存在的连续引用，0分也不能返回空evidence。零分引用仅用于说明所评文本范围，不代表该维度存在正面证据；不得编造引用。无法依据正文评价时返回unavailable并说明原因，不生成分数。",
                     "language": sample["language"], "rubric": {
                         key: policy[key] for key in ("scheme_id", "dimensions", "score_min", "score_max")
                     }}
         if kind == "governance-anomaly":
             return {"sampleId": sample["id"], "sampleRevisionId": sample["revision_id"],
                     "text": sample["text"], "language": sample["language"],
-                    "metadata": sample["metadata"], "schemeId": policy["scheme_id"],
+                    "metadata": {key: value for key, value in sample["metadata"].items()
+                                 if key not in {"reference_risk_level", "reference_value_tier", "reference_is_anomaly"}}, "schemeId": policy["scheme_id"],
                     "ruleVersion": policy["rule_version"], "rules": policy["rules"],
                     "fieldWhitelist": policy["field_whitelist"], "types": policy["types"],
                     "modelApplicableRuleIds": policy["model_applicable_rule_ids"]}
-        masked = self.data.risk_text(sample["text"])
+        masked = self._risk_text(sample)
         return {"sampleId": sample["id"], "sampleRevisionId": sample["revision_id"],
                 "text": masked, "language": sample["language"], "schemeId": policy["scheme_id"],
                 "categories": policy["categories"], "levels": policy["levels"],
-                "rules": policy["rules"], "evidence": self._risk_evidence(sample)}
+                "rules": policy["rules"], "evidence": self._risk_evidence(sample),
+                "instructions": (
+                    "只根据当前正文判断；规则说明只是判断标准，不是正文事实，不得编造。"
+                    "没有符合规则的风险时返回 assessed 且 findings 为空。"
+                    "不得仅凭民族、文化、社区等词语判风险，也不得把普通描述缺少出处直接视为误导。"
+                    "每条风险的 quote 必须是当前遮蔽正文中逐字出现的连续片段，并说明该片段如何满足规则条件。"
+                    "依据不足或无法判断时返回 unassessable、空 findings 和原因。"
+                )}
+
+    def _risk_text(self, sample: Dict[str, Any]) -> str:
+        """风险识别只读取正文，来源、标签等元数据保留用于追溯。"""
+        value = sample["metadata"].get("text") if "metadata" in sample else sample["text"]
+        return self.data.risk_text(value) if isinstance(value, str) else ""
 
     def _risk_evidence(self, sample: Dict[str, Any]) -> List[Dict[str, str]]:
         """生成风险模型可引用的遮蔽文本证据。"""
-        return [{"id": sample["id"] + ":e1", "quote": self.data.risk_text(sample["text"]),
+        return [{"id": sample["id"] + ":e1", "quote": self._risk_text(sample),
                  "feature": "遮蔽后正文"}]
 
     def _validate(self, kind: str, sample: Dict[str, Any],
@@ -206,14 +242,24 @@ class GovernanceService:
             return
         rules = {rule["id"]: rule for rule in policy["rules"]}
         evidence_ids = {item["id"] for item in self._risk_evidence(sample)}
+        masked = self._risk_text(sample)
         for finding in output["findings"]:
             rule = rules.get(finding["ruleId"])
+            quote = finding.get("quote", "")
+            if not quote.strip():
+                raise StructuredOutputValidationError("风险证据：原文引用为空")
+            if quote not in masked:
+                raise StructuredOutputValidationError("风险证据：引用片段不在当前正文中")
+            if not finding["evidenceRefs"] or not set(finding["evidenceRefs"]).issubset(evidence_ids):
+                raise StructuredOutputValidationError("风险证据：证据编号为空或不属于当前样本")
             if (rule is None or rule["version"] != finding["ruleVersion"] or
                 rule["category"] != finding["category"] or
                 finding["category"] not in policy["categories"] or
+                not finding["evidenceRefs"] or
                 not set(finding["evidenceRefs"]).issubset(evidence_ids) or
+                not quote.strip() or quote not in masked or
                 not finding["reason"].strip()):
-                raise ValueError("风险证据、类别或规则版本无效")
+                raise StructuredOutputValidationError("风险证据：类别、规则编号或规则版本不匹配")
 
     def _snapshot(self, task: Dict[str, Any], policy: Dict[str, Any],
                   samples: List[Dict[str, Any]], outcomes: Dict[str, Dict[str, Any]],
@@ -249,10 +295,12 @@ class GovernanceService:
         """由逐条评分计算综合分、档位、均分和分布。"""
         rows = []
         failed = 0
+        failed_samples = []
         for sample in samples:
             outcome = outcomes[sample["id"]]
             if outcome["status"] == "error":
                 failed += 1
+                failed_samples.append({"sample_id": sample["id"], "error_code": outcome.get("error_code"), "reason": (outcome.get("output") or {}).get("validation_error") or (outcome.get("output") or {}).get("error_detail") or "历史任务未保存详细原因"})
                 continue
             output = outcome["output"]
             row = {"id": sample["id"], "text": sample["text"], "language": sample["language"],
@@ -279,7 +327,7 @@ class GovernanceService:
         summary.update({"language_name": task["scope"]["language"], "scheme_name": policy["name"],
                         "mean_score": round(sum(row["score"] for row in valid) / len(valid), 1) if valid else None,
                         "valid_count": len(valid), "high_count": sum(row["tier"] == "high" for row in valid),
-                        "unavailable_count": len(rows) - len(valid), "failed_count": failed,
+                        "unavailable_count": len(rows) - len(valid), "failed_count": failed, "failed_samples": failed_samples,
                         "target_count": len(samples), "languages": sorted({row["language"] for row in rows}),
                         "high_threshold": policy["high_threshold"],
                         "medium_threshold": policy["medium_threshold"],
@@ -335,6 +383,7 @@ class GovernanceService:
     def _risk_snapshot(self, task, policy, samples, outcomes, result_id):
         """汇总风险等级和数量，仅保存遮蔽后的正文。"""
         rows = []
+        failed_samples = []
         predicted_levels = {}
         failed = unassessable = 0
         order = {"HIGH": 0, "MEDIUM": 1, "LOW": 2, "NOTICE": 3}
@@ -342,6 +391,10 @@ class GovernanceService:
             outcome = outcomes[sample["id"]]
             if outcome["status"] == "error":
                 failed += 1
+                failed_samples.append({"sample_id": sample["id"], "language": sample["language"],
+                                       "error_code": outcome.get("error_code"),
+                                       "reason": (outcome.get("output") or {}).get("error_detail")
+                                                 or "历史记录未保存具体原因"})
                 continue
             output = outcome["output"]
             if output["status"] == "unassessable":
@@ -357,7 +410,7 @@ class GovernanceService:
             predicted = predicted_levels.get(sample["id"])
             rows.append({"id": sample["id"], "dataset_id": sample["dataset_id"],
                          "version_id": sample["version_id"], "revision_id": sample["revision_id"],
-                         "text": self.data.risk_text(sample["text"]), "language": sample["language"],
+                         "text": self._risk_text(sample), "language": sample["language"],
                          "primary_category": primary["category"] if primary else "",
                          "maximum_suggested_level": level,
                          # 比对明细导出用：标准档位与逐样本对错（缺任一方时为 null，不猜测）。
@@ -386,6 +439,7 @@ class GovernanceService:
                         "high_count": sum(row["maximum_suggested_level"] == "HIGH" for row in risk_rows),
                         "pending_count": sum(row["status"] == "待复核" for row in rows),
                         "reviewed_count": 0, "unassessable_count": unassessable,
-                        "failed_count": failed, "levels": levels, "actions": [],
+                        "failed_count": failed, "failed_samples": failed_samples,
+                        "levels": levels, "actions": [],
                         "accuracy_correct_count": correct, "accuracy_test_count": len(labeled)})
         return summary, rows

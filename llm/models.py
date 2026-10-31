@@ -1,6 +1,9 @@
 """Model management and typed OpenAI-compatible invocations."""
 
 import json
+import logging
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Type, TypeVar
 from urllib.parse import urlsplit
 
@@ -35,6 +38,7 @@ class InvocationError(Exception):
         self.code = code
         self.status_code = status_code
         self.upstream_status = upstream_status
+        self.details = {}
 
 
 class ModelManager:
@@ -109,6 +113,7 @@ class ModelManager:
             self._log_error(model_id, token_hash, input, type_name, "credential_unavailable", on_record)
             raise InvocationError("credential_unavailable", "Stored model credential cannot be read") from exc
 
+        content = None
         client = None
         try:
             parameters = {}
@@ -187,12 +192,14 @@ class ModelManager:
             self._log_error(model_id, token_hash, input, type_name, "model_refusal", on_record)
             raise InvocationError("model_refusal", "Model response was blocked by content filtering") from exc
         except StructuredOutputValidationError as exc:
-            self._log_error(model_id, token_hash, input, type_name, "invalid_structured_output", on_record)
-            raise InvocationError("invalid_structured_output", "模型结果校验失败：" + str(exc)) from exc
+            self._log_error(model_id, token_hash, input, type_name, "invalid_structured_output", on_record, diagnostics={"raw_response": content, "validation_error": str(exc), "model_name": getattr(record, "name", model_id), "upstream_model_id": record.upstream_model_id})
+            error = InvocationError("invalid_structured_output", "模型结果校验失败：" + str(exc))
+            error.details = {"raw_response": content, "validation_error": str(exc)}
+            raise error from exc
         except (ValidationError, ValueError, json.JSONDecodeError) as exc:
-            self._log_error(model_id, token_hash, input, type_name, "invalid_structured_output", on_record)
+            self._log_error(model_id, token_hash, input, type_name, "invalid_structured_output", on_record, diagnostics={"raw_response": content, "validation_error": str(exc), "model_name": getattr(record, "name", model_id), "upstream_model_id": record.upstream_model_id})
             message = "Model returned invalid structured output"
-            if type_name.startswith("analysis_") and isinstance(exc, ValidationError):
+            if (type_name.startswith("analysis_") or type_name == "governance_risk_sample") and isinstance(exc, ValidationError):
                 error_types = {error["type"] for error in exc.errors(include_input=False, include_context=False)}
                 message = "模型输出的字段类型或取值不符合接口要求"
                 if "json_invalid" in error_types:
@@ -201,7 +208,14 @@ class ModelManager:
                     message = "模型输出缺少必填字段"
                 elif "extra_forbidden" in error_types:
                     message = "模型输出包含未定义字段"
-            raise InvocationError("invalid_structured_output", message) from exc
+                if type_name == "governance_risk_sample" and any(
+                    error["type"] == "missing" and error["loc"][-1:] == ("quote",)
+                    for error in exc.errors(include_input=False, include_context=False)
+                ):
+                    message = "模型输出缺少原文引用（quote）"
+            error = InvocationError("invalid_structured_output", message)
+            error.details = {"raw_response": content, "validation_error": str(exc)}
+            raise error from exc
         except OpenAIError as exc:
             self._log_error(model_id, token_hash, input, type_name, "provider_error", on_record)
             raise InvocationError("provider_error", "Model provider request failed") from exc
@@ -234,15 +248,27 @@ class ModelManager:
                            timeout=timeout, max_retries=max_retries)
 
     def _log_error(self, model_id: str, token_hash: str, input: str,
-                   response_type: str, code: str, on_record=None) -> None:
+                   response_type: str, code: str, on_record=None, diagnostics=None) -> None:
+        if response_type != "governance_value_sample":
+            diagnostics = None
         call = self.calls.create(
             model_id=model_id,
             token_hash=token_hash,
             input=input,
-            output_json=None,
+            output_json=json.dumps(diagnostics, ensure_ascii=False) if diagnostics else None,
             response_type=response_type,
             status="error",
             error_code=code,
         )
+        if diagnostics:
+            logger = logging.getLogger("model_validation")
+            if not logger.handlers:
+                directory = Path(__file__).resolve().parents[1] / ".logs"
+                directory.mkdir(exist_ok=True)
+                handler = RotatingFileHandler(directory / "model-validation.log", maxBytes=5_000_000, backupCount=3, encoding="utf-8")
+                logger.addHandler(handler)
+                logger.setLevel(logging.ERROR)
+                logger.propagate = False
+            logger.error("call_id=%s model_id=%s response_type=%s error_code=%s", call.id, model_id, response_type, code)
         if on_record is not None:
             on_record(call)

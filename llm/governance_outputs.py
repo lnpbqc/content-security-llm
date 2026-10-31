@@ -17,7 +17,7 @@ class ValueDimensionOutput(StrictOutput):
     name: ValueDimensionName
     score: float = Field(ge=0, le=100, allow_inf_nan=False)
     reason: str = Field(min_length=1)
-    evidence: List[str]
+    evidence: List[str] = Field(min_length=1, description="至少一段正文中逐字出现的连续引用。0分也需要引用评估所依据的文本，不能使用空数组。")
 
 
 class ValueSampleOutput(StrictOutput):
@@ -81,6 +81,7 @@ class RiskFindingOutput(StrictOutput):
     """单条风险发现、建议等级和证据引用。"""
     category: RiskCategory
     suggestedLevel: RiskLevel
+    quote: str = Field(min_length=1, description="逐字引用当前遮蔽正文中支持此风险的连续片段")
     reason: str = Field(min_length=1)
     ruleId: str = Field(min_length=1)
     ruleVersion: str = Field(min_length=1)

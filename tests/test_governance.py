@@ -72,7 +72,7 @@ class FakeCompletionClient:
                 findings = []
                 if "用户ID" in data["text"]:
                     findings = [{"category": "个人信息暴露", "suggestedLevel": "MEDIUM",
-                                 "reason": "账户字段与注册时间可关联", "ruleId": "PII-03",
+                                 "quote": "用户ID", "reason": "账户字段与注册时间可关联", "ruleId": "PII-03",
                                  "ruleVersion": "1.0", "evidenceRefs": [data["evidence"][0]["id"]]}]
                 output = {"sampleId": data["sampleId"], "sampleRevisionId": data["sampleRevisionId"],
                           "status": "assessed", "findings": findings,
@@ -470,7 +470,7 @@ def test_risk_options_only_advertise_categories_with_valid_rules(app_client):
     sample = service.data.samples(scope("risk-v1"))[0]
     for rule in policy["rules"]:
         output = {"sampleId": sample["id"], "sampleRevisionId": sample["revision_id"], "findings": [{
-            "category": rule["category"], "suggestedLevel": "NOTICE", "reason": "需核验",
+            "category": rule["category"], "suggestedLevel": "NOTICE", "quote": service._risk_text(sample), "reason": "需核验",
             "ruleId": rule["id"], "ruleVersion": rule["version"], "evidenceRefs": [sample["id"] + ":e1"]}]}
         service._validate("governance-risk", sample, policy, output)
         output["findings"][0]["ruleId"] = "missing"
@@ -1392,15 +1392,15 @@ def test_risk_weight_accuracy_uses_labeled_risk_predictions_and_latest_scope(app
     ]
     FakeCompletionClient.risk_outputs = {
         "3": {"findings": [{"category": "个人信息暴露", "suggestedLevel": "NOTICE",
-                             "reason": "提示", "ruleId": "PII-03", "ruleVersion": "1.0",
+                             "quote": "待提示", "reason": "提示", "ruleId": "PII-03", "ruleVersion": "1.0",
                              "evidenceRefs": ["3:e1"]}]},
         "4": {"status": "unassessable", "findings": [], "unassessableReason": "内容不足"},
         "5": {"status": "invalid"},
         "7": {"findings": [{"category": "个人信息暴露", "suggestedLevel": "LOW",
-                             "reason": "低风险", "ruleId": "PII-03", "ruleVersion": "1.0",
+                             "quote": "低风险", "reason": "低风险", "ruleId": "PII-03", "ruleVersion": "1.0",
                              "evidenceRefs": ["7:e1"]}]},
         "8": {"findings": [{"category": "个人信息暴露", "suggestedLevel": "HIGH",
-                             "reason": "高风险", "ruleId": "PII-03", "ruleVersion": "1.0",
+                             "quote": "高风险", "reason": "高风险", "ruleId": "PII-03", "ruleVersion": "1.0",
                              "evidenceRefs": ["8:e1"]}]},
     }
     task = create(client, "governance-risk", "risk-v1")

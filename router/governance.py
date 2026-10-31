@@ -89,7 +89,11 @@ def _task_public(task: Dict[str, Any], service: GovernanceService) -> Dict[str, 
             pass
     common.update(model_id=model_id, model_name=model_name, model_version=model_version)
     if task["kind"] == "governance-value":
-        return {"task_id": task["id"], "name": task["name"], **common}
+        return {"task_id": task["id"], "name": task["name"], **common,
+                "failed_samples": [{"sample_id": sample_id, "error_code": outcome.get("error_code"),
+                                    "reason": (outcome.get("output") or {}).get("validation_error") or (outcome.get("output") or {}).get("error_detail") or "历史任务未保存详细原因"}
+                                   for sample_id, outcome in service.repository.sample_outcomes(task["id"]).items()
+                                   if outcome["status"] == "error"]}
     if task["kind"] == "governance-anomaly":
         return {"task_id": task["id"], "input": task["scope"], **common,
                 "coverage": len(service.repository.sample_outcomes(task["id"])),
