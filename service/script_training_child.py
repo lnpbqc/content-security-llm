@@ -15,7 +15,9 @@ def main():
     args = parser.parse_args()
     if os.name != "nt":
         def watch_parent():
-            sys.stdin.buffer.read()
+            # 使用原始文件描述符，避免守护线程持有 stdin 缓冲锁导致解释器退出时中止。
+            while os.read(0, 65536):
+                pass
             os.killpg(os.getpgrp(), signal.SIGKILL)
         threading.Thread(target=watch_parent, daemon=True).start()
     source = args.directory / "source.py"

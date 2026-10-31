@@ -32,7 +32,9 @@ def main():
             os._exit(1)
     else:
         def parent_watchdog():
-            sys.stdin.buffer.read()
+            # 不持有 Python stdin 缓冲锁，正常训练结束时解释器才能安全退出。
+            while os.read(0, 65536):
+                pass
             os._exit(1)
 
     threading.Thread(target=parent_watchdog, daemon=True).start()

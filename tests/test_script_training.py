@@ -276,7 +276,7 @@ def test_fashion_parameter_validation(context):
     _, client, _ = context
     request = {"name": "FASHION", "script_id": "fashion-cnn"}
     task = client.post(BASE + "/script-tasks", headers=ADMIN, json=request).json()["data"]
-    assert task["parameters"]["device"] == "cpu" and task["parameters"]["epochs"] == 3
+    assert task["parameters"]["device"] == "auto" and task["parameters"]["epochs"] == 3
     for parameters in ({"train_samples": 99}, {"validation_samples": 10001}, {"device": "CPU"},
                        {"epochs": 0}, {"batch_size": 0}, {"download": "yes"}):
         assert client.post(BASE + "/script-tasks", headers=ADMIN,
