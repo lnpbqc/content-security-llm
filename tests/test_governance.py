@@ -726,14 +726,14 @@ def test_governance_enums_match_general_outputs_and_reject_unknown_values(app_cl
 
 
 def test_business_rows_are_ordered_and_all_fields_become_model_text(app_client):
-    """验证业务库记录与字段排序、语种不筛选及本地源表已移除。"""
+    """验证全部语种范围的业务记录与字段排序，以及本地源表已移除。"""
     app, client, _, business = app_client
     business.datasets[99] = {"name": "自定义数据集", "version": "v2"}
     business.records[99] = [
         {"id": 10, "payload": '{"text":"第二条","language":"zh"}'},
         {"id": 4, "payload": {"zeta": {"b": 2, "a": 1}, "alpha": "第一条", "language": "zh"}},
     ]
-    custom_scope = {"dataset_id": 99, "version_id": "v2", "language": "en", "scheme_id": "general-v1"}
+    custom_scope = {"dataset_id": 99, "version_id": "v2", "language": "all", "scheme_id": "general-v1"}
     response = client.post("/api/v1/tasks", headers=headers(),
                            json={"kind": "governance-value", "name": "查库测试", "input": custom_scope})
     assert response.status_code == 200, response.text
