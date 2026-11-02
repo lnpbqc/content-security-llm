@@ -8,7 +8,7 @@ from pydantic import BaseModel
 
 from db.governance import GovernanceRepository
 from db.governance_config import GovernanceConfigRepository
-from llm.governance_outputs import AnomalySampleOutput, MultilingualSampleOutput, RiskSampleOutput, ValueSampleOutput
+from llm.governance_outputs import AnomalyLabelJudgment, AnomalyRepairOutput, AnomalySampleOutput, MultilingualSampleOutput, RiskSampleOutput, ValueSampleOutput
 from llm.models import InvocationError, ModelManager, ModelNotFoundError
 from llm.structured_output import StructuredOutputValidationError
 from service.governance_data import BusinessGovernanceData
@@ -18,6 +18,7 @@ from utils.time import utc_now
 
 KINDS = {"governance-value", "governance-anomaly", "governance-risk", "ethnic-multilingual"}
 REFERENCE_RISK_LEVELS = ("safe", "low", "medium", "high")
+BODY_ONLY_ANOMALY_SCHEMES = {"anomaly-basic-v2", "anomaly-basic-v2.1"}
 OUTPUT_TYPES: Dict[str, Type[BaseModel]] = {
     "governance-value": ValueSampleOutput,
     "governance-anomaly": AnomalySampleOutput,
@@ -120,7 +121,20 @@ class GovernanceService:
                 })
                 continue
             prompt = self._model_input(kind, sample, policy)
+            if kind == "governance-anomaly" and policy["scheme_id"] in BODY_ONLY_ANOMALY_SCHEMES:
+                label = prompt["metadata"].get("topic_label")
+                if not prompt["text"].strip() or not isinstance(label, str) or not label.strip():
+                    self.repository.save_sample(task["id"], sample["id"], {
+                        "sampleId": sample["id"], "sampleRevisionId": sample["revision_id"],
+                        "status": "unavailable", "findings": [],
+                        "unavailableReason": "正文或主题标签缺失、为空或类型无效，无法判断主题是否冲突",
+                    })
+                    continue
             try:
+                if kind == "governance-anomaly" and policy.get("two_stage"):
+                    output = self._judge_anomaly(task, sample, policy, prompt)
+                    self.repository.save_sample(task["id"], sample["id"], output)
+                    continue
                 parsed = self.manager.invoke(
                     task["model_id"], json.dumps(prompt, ensure_ascii=False), OUTPUT_TYPES[kind],
                     response_type=RESPONSE_TYPES[kind], token_hash=task["token_hash"],
@@ -153,6 +167,50 @@ class GovernanceService:
             summary["data_source"] = "mock"
         self.repository.publish(task, summary, public_samples, result_id=result_id)
 
+    def _judge_anomaly(self, task, sample, policy, prompt):
+        """先独立判主题关系；匹配及证据不足不进入修复生成。"""
+        data = {key: prompt[key] for key in (
+            "sampleId", "sampleRevisionId", "text", "language", "metadata", "schemeId", "ruleVersion", "allowedLabels")}
+
+        def check_judgment(value):
+            if value.sampleId != sample["id"] or value.sampleRevisionId != sample["revision_id"]:
+                raise StructuredOutputValidationError("主题匹配判断的样本或修订编号不一致")
+            if value.quote and value.quote not in prompt["text"]:
+                raise StructuredOutputValidationError("主题匹配引用不在正文中")
+            if value.relation == "conflict" and (
+                not value.quote.strip() or value.quote.strip() == str(prompt["metadata"]["topic_label"]).strip()
+            ):
+                raise StructuredOutputValidationError("主题冲突缺少正文依据")
+
+        judgment = self.manager.invoke(
+            task["model_id"], json.dumps(data, ensure_ascii=False), AnomalyLabelJudgment,
+            response_type="governance_anomaly_label_judgment", token_hash=task["token_hash"],
+            validator=check_judgment, temperature=0, timeout=120, max_retries=0,
+        ).model_dump(mode="json")
+        base = {"sampleId": sample["id"], "sampleRevisionId": sample["revision_id"],
+                "labelJudgment": judgment, "findings": []}
+        if judgment["relation"] == "compatible":
+            return {**base, "status": "assessed", "unavailableReason": None}
+        if judgment["relation"] == "uncertain":
+            return {**base, "status": "unavailable", "unavailableReason": judgment["reason"]}
+
+        repair_input = {**data, "labelJudgment": judgment,
+                        **{key: prompt[key] for key in ("rules", "fieldWhitelist", "types", "modelApplicableRuleIds")}}
+
+        def check_repair(value):
+            self._validate("governance-anomaly", sample, policy, value.model_dump(mode="json"))
+            if value.status == "assessed" and (not value.findings or any(not f.fieldChanges for f in value.findings)):
+                raise StructuredOutputValidationError("主题冲突修复缺少具体发现或字段建议")
+
+        repair = self.manager.invoke(
+            task["model_id"], json.dumps(repair_input, ensure_ascii=False), AnomalyRepairOutput,
+            response_type="governance_anomaly_label_repair", token_hash=task["token_hash"],
+            validator=check_repair, temperature=0, timeout=120, max_retries=0,
+        ).model_dump(mode="json")
+        # 模型自报检查项的 false 可能表示“原标签不匹配”，不能作为否决开关。
+        # 以显式 status/findings 和服务端校验为准；原始检查项仍留在样本输出中。
+        return {**repair, "labelJudgment": judgment}
+
     def _model_input(self, kind: str, sample: Dict[str, Any], policy: Dict[str, Any]) -> Dict[str, Any]:
         """按任务类型组装单条模型输入；风险文本先遮蔽。"""
         if kind == "ethnic-multilingual":
@@ -170,6 +228,16 @@ class GovernanceService:
                         key: policy[key] for key in ("scheme_id", "dimensions", "score_min", "score_max")
                     }}
         if kind == "governance-anomaly":
+            if policy["scheme_id"] in BODY_ONLY_ANOMALY_SCHEMES:
+                metadata = sample.get("metadata", {})
+                body = metadata.get("text")
+                return {"sampleId": sample["id"], "sampleRevisionId": sample["revision_id"],
+                        "text": body if isinstance(body, str) else "", "language": sample["language"],
+                        "metadata": {"topic_label": metadata.get("topic_label")},
+                        "schemeId": policy["scheme_id"], "ruleVersion": policy["rule_version"],
+                        "rules": policy["rules"], "fieldWhitelist": policy["field_whitelist"],
+                        "types": policy["types"], "modelApplicableRuleIds": policy["model_applicable_rule_ids"],
+                        "allowedLabels": policy["allowed_labels"], "instructions": policy["instructions"]}
             return {"sampleId": sample["id"], "sampleRevisionId": sample["revision_id"],
                     "text": sample["text"], "language": sample["language"],
                     "metadata": {key: value for key, value in sample["metadata"].items()
@@ -228,16 +296,23 @@ class GovernanceService:
         if kind == "governance-anomaly":
             rules = set(policy["model_applicable_rule_ids"])
             fields = set(policy["field_whitelist"])
+            body = (self._model_input(kind, sample, policy)["text"]
+                    if policy["scheme_id"] in BODY_ONLY_ANOMALY_SCHEMES else sample["text"])
             for finding in output["findings"]:
                 if (finding["ruleId"] not in rules or finding["type"] != "标签异常" or
                     finding["field"] not in fields or not finding["quote"].strip() or
-                    finding["quote"] not in sample["text"] or
+                    finding["quote"] not in body or
                     not finding["reason"].strip()):
                     raise ValueError("异常证据或规则无效")
+                if policy["scheme_id"] in BODY_ONLY_ANOMALY_SCHEMES and not policy["allowed_labels"] and "枚举" in finding["reason"]:
+                    raise ValueError("未配置标签清单，不得以枚举值为由判定异常")
+                if policy["scheme_id"] in BODY_ONLY_ANOMALY_SCHEMES and finding["quote"].strip() == str(sample["metadata"].get("topic_label", "")).strip():
+                    raise ValueError("仅引用标签本身不能证明主题冲突，请引用正文依据")
                 for change in finding["fieldChanges"]:
                     if (change["field"] not in fields or
                         change["before"] != sample["metadata"].get(change["field"]) or
-                        not change["after"].strip()):
+                        not change["after"].strip() or
+                        (policy["scheme_id"] in BODY_ONLY_ANOMALY_SCHEMES and change["before"].strip() == change["after"].strip())):
                         raise ValueError("异常字段变更无效")
             return
         rules = {rule["id"]: rule for rule in policy["rules"]}
@@ -351,7 +426,7 @@ class GovernanceService:
             candidates = [{"candidate_id": str(uuid4()),
                            "input_sample_revision_id": sample["revision_id"],
                            "field_changes": finding["fieldChanges"], "reason": finding["reason"],
-                           "validation_results": [{"name": "服务端规则、字段及原文引用校验", "passed": True}],
+                           "validation_results": [{"name": "返回格式、字段及原文引用检查通过（不代表错标已确认）", "passed": True}],
                            "status": "DRAFT"} for finding in findings if finding["fieldChanges"]]
             rows.append({"id": sample["id"], "dataset_id": sample["dataset_id"],
                          "version_id": sample["version_id"], "revision_id": sample["revision_id"],
@@ -364,6 +439,7 @@ class GovernanceService:
                              {key: finding[key] for key in ("type", "field", "reason", "quote", "ruleId")}
                              for finding in findings],
                          "source": {}, "metadata": sample["metadata"], "candidates": candidates,
+                         **({"label_judgment": output["labelJudgment"]} if "labelJudgment" in output else {}),
                          "timeline": [{"at": now, "message": "模型检测完成"}], "actions": [],
                          **({"unavailable_reason": output["unavailableReason"]}
                             if output["status"] == "unavailable" else {})})

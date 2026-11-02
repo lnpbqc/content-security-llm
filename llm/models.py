@@ -103,6 +103,7 @@ class ModelManager:
         on_record: Optional[Callable[[CallRecord], None]] = None,
         temperature: Optional[float] = None, max_tokens: Optional[int] = None,
         timeout: Optional[float] = None, max_retries: Optional[int] = None,
+        system_prompt: Optional[str] = None,
     ) -> T:
         """调用模型并解析结构；可选校验器失败时记为错误调用。"""
         record = self.get_model(model_id)
@@ -127,6 +128,8 @@ class ModelManager:
                     }
                     if record.upstream_model_id.rstrip("/").rsplit("/", 1)[-1].lower() == "qwen3-8b":
                         parameters["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
+            if response_model is None and type_name == "model-evaluation-answer" and record.upstream_model_id.rstrip("/").rsplit("/", 1)[-1].lower() == "qwen3-8b":
+                parameters["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
             if temperature is not None:
                 parameters["temperature"] = temperature
             if max_tokens is not None:
@@ -143,7 +146,7 @@ class ModelManager:
                 model=record.upstream_model_id,
                 messages=[
                     {"role": "system", "content": schema_system_prompt(response_model) if response_model else
-                     "请根据用户的提示生成回答，只返回回答正文。"},
+                     (system_prompt or "请根据用户的提示生成回答，只返回回答正文。")},
                     {"role": "user", "content": input},
                 ],
                 **parameters,

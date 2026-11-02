@@ -58,7 +58,9 @@ uv run fastapi dev main.py --host 127.0.0.1 --port 8001
 uv run python -m scripts.init_mysql
 ```
 
-建表 SQL 位于 [db/mysql_schema.sql](db/mysql_schema.sql)，也可通过 MySQL 客户端在目标库中执行该文件。脚本复用这份 SQL，按依赖顺序创建 13 张 `llm_` 表并检查结构；使用 MySQL 8.4、InnoDB 和 utf8mb4，包含主键、唯一约束、外键、状态约束及任务查询索引。重复执行不会清空已有数据；已有不兼容的表会报错，不自动改表。
+建表 SQL 位于 [db/mysql_schema.sql](db/mysql_schema.sql)，也可通过 MySQL 客户端在目标库中执行该文件。脚本复用这份 SQL，按依赖顺序创建当前定义的 `llm_` 表并检查结构；使用 MySQL 8.4、InnoDB 和 utf8mb4，包含主键、唯一约束、外键、状态约束及任务查询索引。重复执行不会清空已有数据；已有不兼容的表会报错，不自动改表。
+
+已有数据库可执行 `uv run python -m scripts.init_mysql --check`，只核对结构，不执行建表。脚本按 SQL 定义统计所需表数，并提示实际存在的额外 `llm_` 表。历史库可能保留已停用的 `llm_business_database_config`；它不属于当前必需表，新电脑无需创建，脚本也不会删除旧库中的这张表。结构不兼容时仍需单独准备迁移方案，重复初始化不会自动修复旧表字段。
 
 建表完成后启动 API 和所需 worker。API 和 worker 启动只检查结构，不自动建表。建表账号需有 CREATE 权限，运行账号需有 SELECT/INSERT/UPDATE/DELETE 权限。本项目使用 `llm_` 前缀，与业务后端已有的无前缀表分开。
 

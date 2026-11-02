@@ -114,6 +114,14 @@ CREATE TABLE IF NOT EXISTS llm_governance_model_bindings (
     FOREIGN KEY (model_id) REFERENCES llm_models(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
+CREATE TABLE IF NOT EXISTS llm_model_evaluation_bindings (
+    platform_model_id VARCHAR(64) NOT NULL,
+    version VARCHAR(100) NOT NULL,
+    config_json LONGTEXT NOT NULL,
+    updated_at VARCHAR(40) NOT NULL,
+    PRIMARY KEY (platform_model_id, version)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
 CREATE TABLE IF NOT EXISTS llm_training_tasks (
     id VARCHAR(64) PRIMARY KEY,
     token_hash VARCHAR(64) NOT NULL,

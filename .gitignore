@@ -53,3 +53,4 @@ docs/
 !/neurotrace-run/inputs/*/token_alignment.json
 !/neurotrace-run/inputs/*/clean_prompt.txt
 !/neurotrace-run/inputs/*/poison_prompt.txt
+!/模型评估版本绑定.md

@@ -24,6 +24,7 @@ from router.analysis import router as analysis_router
 from router.ethnic_multilingual import router as ethnic_multilingual_router
 from router.neural_trace import router as neural_trace_router
 from router.model_frontend import router as model_frontend_router
+from router.model_evaluation import router as model_evaluation_router
 from router.governance import router as governance_router
 from router.governance_admin import router as governance_admin_router
 from router.governance_frontend import router as governance_frontend_router
@@ -89,6 +90,7 @@ def create_app(
     application.include_router(ethnic_multilingual_router)
     application.include_router(neural_trace_router)
     application.include_router(model_frontend_router)
+    application.include_router(model_evaluation_router)
 
     @application.exception_handler(HTTPException)
     async def governance_http_error(request: Request, exc: HTTPException):

@@ -38,9 +38,13 @@ def governance_options(request: Request, kind: str = Query(...),
         return success(request, {"schemes": schemes})
     if kind != "governance-anomaly":
         raise HTTPException(400, detail={"code": "invalid_kind", "message": "任务类型与路径不一致"})
-    policy = service.data.policy(kind, "anomaly-basic-v1")
+    policy = service.data.policy(kind, "anomaly-basic-v2.1")
+    previous = service.data.policy(kind, "anomaly-basic-v2")
+    legacy = service.data.policy(kind, "anomaly-basic-v1")
     return success(request, {
-        "schemes": [{"id": policy["scheme_id"], "name": policy["name"]}],
+        "schemes": [{"id": item["scheme_id"], "name": item["name"] + ("（历史方案）" if item is legacy else ""),
+                     "rules": [rule for rule in item["rules"] if rule["id"] in item["model_applicable_rule_ids"]]}
+                    for item in (policy, previous, legacy)],
         "rules": [rule for rule in policy["rules"]
                   if rule["id"] in policy["model_applicable_rule_ids"]],
         "types": ["标签异常"], "read_only": True,

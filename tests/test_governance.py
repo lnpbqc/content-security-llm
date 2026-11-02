@@ -240,7 +240,11 @@ def test_empty_dataset_mock_samples_publish_marked_snapshots(app_client, kind, s
     assert summary["data_source"] == "mock"
     page = client.get(base + "/samples", headers=headers()).json()["data"]
     assert page["total"] > 0
-    assert all("临时模拟数据" in row["text"] for row in page["items"])
+    if name == "risk":
+        expected_body = {sample["id"]: service._risk_text(sample) for sample in samples}
+        assert all(row["text"] == expected_body[row["id"]] for row in page["items"])
+    else:
+        assert all("临时模拟数据" in row["text"] for row in page["items"])
     paged_items = []
     for number in range(1, (page["total"] + 1) // 2 + 1):
         response = client.get(base + "/samples", headers=headers(),
@@ -416,7 +420,7 @@ def test_value_scoring_requires_real_nonblank_evidence(app_client, monkeypatch, 
         else:
             text = json.loads(kwargs["messages"][-1]["content"])["text"]
             evidence = {"empty": [], "blank": [" "], "fabricated": ["不存在的引用正文"],
-                        "valid": [text.splitlines()[0] + "\n"]}[case]
+                        "valid": [text.splitlines()[0]]}[case]
             for dimension in output["dimensions"]:
                 dimension["evidence"] = evidence
         result.choices[0].message.content = json.dumps(output, ensure_ascii=False)
@@ -436,7 +440,8 @@ def test_value_scoring_requires_real_nonblank_evidence(app_client, monkeypatch, 
         result = service.repository.get_result(saved["result_id"], saved["token_hash"], saved["kind"])
         assert result["summary"]["valid_count"] == (3 if case == "valid" else 0)
         if case == "valid":
-            assert result["samples"][0]["dimensions"][0]["evidence"][0].endswith("\n")
+            quote = result["samples"][0]["dimensions"][0]["evidence"][0]
+            assert quote.strip() and quote in result["samples"][0]["text"]
         else:
             assert result["summary"]["unavailable_count"] == 3
 
@@ -949,6 +954,68 @@ def test_existing_sqlite_tokens_import_with_missing_label(tmp_path):
     assert row == {"id": "old", "label": "", "deleted_at": None}
 
 
+def test_anomaly_v21_uses_judgment_before_repair(app_client, monkeypatch):
+    app, client, _, _ = app_client
+    original = FakeCompletionClient.create
+    stages = []
+
+    def completion(self, **kwargs):
+        prompt = json.loads(kwargs["messages"][-1]["content"])
+        system = kwargs["messages"][0]["content"]
+        if "labelJudgment" in prompt:
+            stages.append("repair")
+            assert "无法确认冲突" in system
+            response = original(self, **kwargs)
+            output = json.loads(response.choices[0].message.content)
+            for finding in output["findings"]:
+                finding["validationResults"] = [{"name": "主题标签明显冲突", "passed": False}]
+            response.choices[0].message.content = json.dumps(output, ensure_ascii=False)
+            return response
+        stages.append("judge")
+        assert "上位分类" in system
+        assert "instructions" not in prompt and "rules" not in prompt
+        conflict = prompt["metadata"]["topic_label"] == "体育"
+        output = {"sampleId": prompt["sampleId"], "sampleRevisionId": prompt["sampleRevisionId"],
+                  "relation": "conflict" if conflict else "compatible", "textTopic": "正文主要主题",
+                  "labelMeaning": "体育比赛" if conflict else "宽泛的综合主题", "quote": prompt["text"],
+                  "reason": "文化传承不属于体育赛事" if conflict else "正文属于标签范围"}
+        return SimpleNamespace(choices=[SimpleNamespace(finish_reason="stop",
+            message=SimpleNamespace(content=json.dumps(output, ensure_ascii=False), refusal=None))])
+
+    monkeypatch.setattr(FakeCompletionClient, "create", completion)
+    task = create(client, "governance-anomaly", "anomaly-basic-v2.1")
+    service = app.state.governance_service
+    assert service.run_once()
+    saved = service.repository.get_task(task["task_id"])
+    assert saved["status"] == "succeeded"
+    result = service.repository.get_result(saved["result_id"], saved["token_hash"], saved["kind"])
+    assert result["summary"]["valid_count"] == 3
+    assert result["summary"]["anomaly_count"] == 1
+    assert stages == ["judge", "judge", "judge", "repair"]
+    assert [row["label_judgment"]["relation"] for row in result["samples"]] == ["compatible", "compatible", "conflict"]
+
+
+def test_anomaly_v2_processes_body_and_keeps_normal_samples_out_of_findings(app_client):
+    app, client, _, _ = app_client
+    task = create(client, "governance-anomaly", "anomaly-basic-v2")
+    service = app.state.governance_service
+    assert service.run_once()
+    saved = service.repository.get_task(task["task_id"])
+    assert saved["status"] == "succeeded"
+    result = service.repository.get_result(saved["result_id"], saved["token_hash"], saved["kind"])
+    assert result["summary"]["valid_count"] == 3
+    assert result["summary"]["anomaly_count"] == 1
+    assert result["summary"]["scope"]["scheme_id"] == "anomaly-basic-v2"
+    for raw in FakeCompletionClient.calls:
+        prompt = json.loads(raw)
+        assert set(prompt["metadata"]) == {"topic_label"}
+        assert "_source" not in prompt["text"]
+        assert prompt["allowedLabels"] is None
+    abnormal = next(row for row in result["samples"] if row["findings"])
+    assert abnormal["findings"][0]["quote"] == "文化传承"
+    assert "不代表错标已确认" in abnormal["candidates"][0]["validation_results"][0]["name"]
+
+
 def test_frontend_options_empty_overviews_and_business_boundary(app_client):
     """无历史时可初始化；方案只显示模型能力，业务目录不由模型服务接管。"""
     app, client, _, business = app_client
@@ -957,7 +1024,7 @@ def test_frontend_options_empty_overviews_and_business_boundary(app_client):
     assert [row["id"] for row in options["schemes"]] == ["general-v1", "general-v2"]
     options = client.get("/api/v1/data-governance/options", headers=headers(),
                          params={"kind": "governance-anomaly"}).json()["data"]
-    assert options["schemes"][0]["id"] == "anomaly-basic-v1"
+    assert [scheme["id"] for scheme in options["schemes"]] == ["anomaly-basic-v2.1", "anomaly-basic-v2", "anomaly-basic-v1"]
     assert options["types"] == ["标签异常"]
     assert [rule["id"] for rule in options["rules"]] == ["anomaly-rule-1"]
     risk = client.get("/api/v1/data-governance/risk-options", headers=headers()).json()["data"]

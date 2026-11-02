@@ -54,11 +54,22 @@ class AnomalyFindingOutput(StrictOutput):
     """单条异常发现及其候选字段变更。"""
     type: AnomalyType
     field: str = Field(min_length=1)
-    quote: str = Field(min_length=1)
+    quote: str = Field(min_length=1, description="正文中支持异常判断的连续原文；仅引用标签本身不能证明主题冲突。")
     ruleId: str = Field(min_length=1)
-    reason: str = Field(min_length=1)
+    reason: str = Field(min_length=1, description="解释字段与正文的具体冲突；近义、合理上下级标签及可选措辞优化不构成异常。")
     fieldChanges: List[FieldChangeOutput]
     validationResults: List[ValidationOutput]
+
+
+class AnomalyLabelJudgment(StrictOutput):
+    """先判断主题关系，不要求寻找异常或给出替换标签。"""
+    sampleId: str = Field(min_length=1)
+    sampleRevisionId: str = Field(min_length=1)
+    relation: Literal["compatible", "conflict", "uncertain"]
+    textTopic: str = Field(min_length=1, description="正文的主要主题；无法确定时说明不足。")
+    labelMeaning: str = Field(min_length=1, description="原标签允许覆盖的含义范围，不要求标签与正文同样具体。")
+    quote: str = Field(description="正文中的连续引用；无法引用时为空字符串。")
+    reason: str = Field(min_length=1, description="解释为什么主题属于、不属于或无法确定属于标签范围。")
 
 
 class AnomalySampleOutput(StrictOutput):
@@ -75,6 +86,10 @@ class AnomalySampleOutput(StrictOutput):
         if self.status == "unavailable" and (self.findings or not self.unavailableReason):
             raise ValueError("unavailable output requires a reason and no findings")
         return self
+
+
+class AnomalyRepairOutput(AnomalySampleOutput):
+    """仅用于主题冲突已通过第一步判断的修复建议。"""
 
 
 class RiskFindingOutput(StrictOutput):

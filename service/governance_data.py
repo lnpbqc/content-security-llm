@@ -63,6 +63,29 @@ class BusinessGovernanceData:
                 "high_threshold": 85 if scheme_id == "general-v1" else 90,
                 "medium_threshold": 60,
             }
+        if kind == "governance-anomaly" and scheme_id == "anomaly-basic-v2.1":
+            policy = self.policy(kind, "anomaly-basic-v2")
+            return {**policy, "scheme_id": scheme_id, "rule_version": scheme_id,
+                    "name": "基础异常检测 v2.1（先判断匹配，再生成建议）", "two_stage": True}
+        if kind == "governance-anomaly" and scheme_id == "anomaly-basic-v2":
+            return {
+                "scheme_id": scheme_id, "name": "基础异常检测 v2.0（主题明显冲突）",
+                "rule_version": scheme_id,
+                "rules": [{"id": "anomaly-rule-1", "name": "主题标签明显冲突",
+                           "description": "只报告标签与正文主题明显冲突的错标。允许近义、合理细分类别和上下级标签；标签长短、措辞或可简化不构成异常。未配置标签清单，不检查枚举值。"}],
+                "field_whitelist": ["topic_label"], "types": ["标签异常"],
+                "model_applicable_rule_ids": ["anomaly-rule-1"],
+                "allowed_labels": None,
+                "instructions": (
+                    "只根据 text 正文与 metadata.topic_label 判断主题是否明显冲突。"
+                    "合理近义词、细分类别和上下级类别均视为匹配，不因表达不同、标签较长或可以简化而报异常。"
+                    "例如烤馕介绍配各地美食、地方饮食、美食均正常，配篮球赛事才是明显冲突。"
+                    "allowedLabels 为 null，表示没有配置标签枚举清单；禁止自行发明合法标签或以不符合枚举为由报异常。"
+                    "正常时返回 assessed、空 findings；标签缺失或正文不足以判断时返回 unavailable、空 findings 和具体原因。"
+                    "只有明显错标才生成 findings；quote 必须逐字引用正文中支持判断的连续片段，不能仅引用标签。"
+                    "reason 必须说明原标签与正文主题的具体矛盾。不得为了统一名称生成修改建议。"
+                ),
+            }
         if kind == "governance-anomaly" and scheme_id == "anomaly-basic-v1":
             return {
                 "scheme_id": scheme_id, "name": "基础异常检测 v1.0",

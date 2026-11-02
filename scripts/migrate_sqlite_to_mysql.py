@@ -118,7 +118,7 @@ def main():
         report = migrate(args.source, database)
         print(json.dumps(report, ensure_ascii=False, indent=2))
     else:
-        print("14 llm_ tables ready; business tables unchanged")
+        print(f"{len(TABLES)} llm_ tables ready; business tables unchanged")
 
 
 if __name__ == "__main__":
