@@ -46,7 +46,7 @@ def scenario(model_id, code="public_opinion"):
 def output(code="public_opinion"):
     return deepcopy({"scenario_code": code, "summary": "提交材料分析", "risk_level": "medium",
                      "evidence": [CITE], "recommendations": ["核对来源"], "limitations": ["仅分析提交材料"],
-                     "insufficient_materials": False, "details": {"type": code, **DETAILS[code]}})
+                     "insufficient_materials": False, "assessment_status": "assessed", "unavailable_fields": [], "assessment_reason": None, "details": {"type": code, **DETAILS[code]}})
 
 
 def audit(model_id, audit_type="reasoning"):
@@ -57,7 +57,7 @@ def audit(model_id, audit_type="reasoning"):
 
 def audit_output(audit_type="reasoning"):
     result = {"audit_type": audit_type, "subject": deepcopy(SUBJECT), "conclusion": "需要人工核验",
-              "limitations": ["模型建议"], "verification_state": "unverified"}
+              "limitations": ["模型建议"], "verification_state": "unverified", "assessment_status": "assessed", "unavailable_fields": [], "assessment_reason": None}
     if audit_type == "reasoning":
         result["risk_nodes"] = [deepcopy(FINDING)]
     else:
@@ -73,7 +73,8 @@ def api(tmp_path):
 
     def handle(request):
         requests.append(request)
-        value = upstream["queue"].pop(0)
+        value = upstream["queue"].pop(0) if upstream["queue"] else upstream["last"]
+        upstream["last"] = value
         if isinstance(value, type) and issubclass(value, httpx.TransportError):
             raise value("private provider error", request=request)
         if isinstance(value, int):
@@ -139,8 +140,7 @@ def test_each_scene_rejects_another_scene_shape(api, code):
     other = "cyber_security" if code != "cyber_security" else "public_opinion"
     upstream["queue"] = [output(other)]
     response = post(client, "scenarios", scenario(model, code))
-    assert response.status_code == 502
-    assert response.json()["data"]["error_code"] == "invalid_structured_output"
+    assert_unavailable(response)
 
 
 @pytest.mark.parametrize("change", ["unknown_scene", "empty", "duplicate", "reserved", "bad_language", "wrong_target", "missing_model"])
@@ -200,7 +200,7 @@ def test_all_quote_locations_are_validated(api, where, bad):
     citation["source_id" if bad == "source" else "quote"] = "伪造内容"
     upstream["queue"] = [result]
     response = post(client, "scenarios", scenario(model))
-    assert response.status_code == 502 and response.json()["data"]["result"] is None
+    assert_unavailable(response)
 
 
 @pytest.mark.parametrize("code", DETAILS)
@@ -230,7 +230,7 @@ def test_hot_event_time_constraints(api, change):
     if change == "trend_without_time":
         result["details"].update(timeline=[], trend=deepcopy(CLAIM))
     upstream["queue"] = [result]
-    assert post(client, "scenarios", payload).status_code == 502
+    assert_unavailable(post(client, "scenarios", payload))
 
 
 @pytest.mark.parametrize("language,expected", [("en", 200), ("fr", 502), (None, 502)])
@@ -241,25 +241,42 @@ def test_cross_cultural_target_translation(api, language, expected):
     result = output("cross_cultural")
     result["details"]["translation"] = {"target_language": language, "text": "Please provide ID."} if language else None
     upstream["queue"] = [result]
-    assert post(client, "scenarios", payload).status_code == expected
+    response = post(client, "scenarios", payload)
+    if expected == 200:
+        assert response.status_code == 200
+    else:
+        assert_unavailable(response)
 
 
-@pytest.mark.parametrize("bad", ["missing_material", "question_citation", "uncited_answer", "extra_answer", "extra", "empty_result"])
+@pytest.mark.parametrize("bad", ["missing_material", "question_citation", "uncited_answer", "extra", "empty_result"])
 def test_government_policy_and_invalid_structures(api, bad):
     client, model, upstream, _ = api
     payload, result = scenario(model, "smart_government"), output("smart_government")
     if bad == "missing_material": payload["materials"] = []
     if bad == "question_citation": result["details"]["policy_claims"][0]["evidence"][0]["source_id"] = "input"
     if bad == "uncited_answer": result["details"]["policy_claims"] = []
-    if bad == "extra_answer": result["details"]["answer"] += "\n还需要缴费100元"
     if bad == "extra": result["unrequested"] = True
     if bad == "empty_result": result["summary"] = " "
     upstream["queue"] = [result]
-    assert post(client, "scenarios", payload).status_code == 502
+    assert_unavailable(post(client, "scenarios", payload))
+
+
+def test_government_answer_drops_unreferenced_extra_text(api):
+    client, model, upstream, _ = api
+    payload, result = scenario(model, "smart_government"), output("smart_government")
+    result["details"]["answer"] += "\n还需要缴费100元"
+    upstream["queue"] = [result]
+    response = post(client, "scenarios", payload)
+    assert response.status_code == 200, response.text
+    record = response.json()["data"]
+    assert record["status"] == "succeeded"
+    assert "还需要缴费100元" not in response.text
+    details = record["result"]["details"]
+    assert details["answer"] == "\n".join(claim["text"] for claim in details["policy_claims"])
 
 
 def governed(original):
-    return {"originalOutput": original, "governedOutput": "安全回答", "riskLevel": "medium", "reason": "移除风险", "reconstruction": None}
+    return {"originalOutput": original, "governedOutput": "安全回答", "riskLevel": "medium", "reason": "移除风险", "reconstruction": None, "assessment_status": "assessed", "unavailable_fields": [], "assessment_reason": None}
 
 
 @pytest.mark.parametrize("with_parameters", [False, True])
@@ -292,6 +309,11 @@ def test_generation_failure_preserves_correct_stage_and_partial_answer(api, fail
         "invalid json" if failure == "invalid" else httpx.ReadTimeout if failure == "timeout" else 500)
     upstream["queue"] = [500] if failure == "first_stage" else ["真实原始回答", value]
     response = post(client, "model-governance", {"model_id": model, "prompt": "生成回答"})
+    if failure in {"tampered", "invalid"}:
+        assert_unavailable(response)
+        assert response.json()["data"]["original_output"] == "真实原始回答"
+        assert len(requests) == 3
+        return
     assert response.status_code == (504 if failure == "timeout" else 502)
     record = response.json()["data"]
     assert record["status"] == "failed" and record["result"] is None
@@ -337,7 +359,7 @@ def test_audit_rejects_fake_references_and_business_verification(api, audit_type
     if bad == "version": result["subject"]["version"] = "v2"
     if bad == "verified": result["verification_state"] = "verified"
     upstream["queue"] = [result]
-    assert post(client, "audits", payload).status_code == 502
+    assert_unavailable(post(client, "audits", payload))
 
 
 @pytest.mark.parametrize("audit_type", ["reasoning", "full_chain"])
@@ -382,7 +404,7 @@ def test_options_history_pagination_filters_isolation_and_precise_call_associati
     assert {item["code"] for item in options["scenarios"]} == set(DETAILS)
     assert history(client)["total"] == 0
     first = post(client, "scenarios", scenario(model)).json()["data"]
-    upstream["queue"] = [output("cyber_security"), "bad", audit_output()]
+    upstream["queue"] = [output("cyber_security"), 500, audit_output()]
     other = post(client, "scenarios", scenario(model, "cyber_security"), auth("b" * 64)).json()["data"]
     failed = post(client, "scenarios", scenario(model)).json()["data"]
     audited = post(client, "audits", audit(model)).json()["data"]
@@ -425,7 +447,14 @@ def test_insufficiency_and_sentiment_require_valid_basis(api, invalid):
         result["insufficient_materials"] = True
         if invalid == "limits": result.update(risk_level="unknown", limitations=[])
     upstream["queue"] = [result]
-    assert post(client, "scenarios", scenario(model)).status_code == 502
+    response = post(client, "scenarios", scenario(model))
+    if invalid == "sentiment":
+        # 没有原文依据的情绪结论会被降级为 unknown，其余有依据的分析继续返回。
+        assert response.status_code == 200, response.text
+        details = response.json()["data"]["result"]["details"]
+        assert details["sentiment"] == "unknown" and details["sentiment_evidence"] == []
+    else:
+        assert_unavailable(response)
 
 
 def test_blank_generation_stops_before_governance(api):
@@ -446,7 +475,7 @@ def test_chain_check_cannot_claim_verification_without_mapped_evidence(api, inva
         payload.update(evidence=[], steps=[], rules=[])
         result.update(checks=[], risks=[], limitations=[])
     upstream["queue"] = [result]
-    assert post(client, "audits", payload).status_code == 502
+    assert_unavailable(post(client, "audits", payload))
 
 
 def test_unverifiable_chain_check_is_supported(api):
@@ -476,7 +505,7 @@ def test_inactive_token_cannot_start_or_query_analysis(api, monkeypatch, state):
 def test_saved_success_and_failure_survive_app_restart(api):
     client, model, upstream, requests = api
     original = post(client, "scenarios", scenario(model)).json()["data"]
-    upstream["queue"] = ["invalid json"]
+    upstream["queue"] = [500]
     failure = post(client, "scenarios", scenario(model)).json()["data"]
     settings = Settings(client.app.state.database.data_dir, "s" * 32, Fernet.generate_key())
     with TestClient(create_app(settings)) as restarted:
@@ -509,7 +538,7 @@ def test_hot_events_rejects_single_material_contradiction(api):
     result = output("hot_events")
     result["details"]["contradictions"] = [deepcopy(CLAIM)]
     upstream["queue"] = [result]
-    assert post(client, "scenarios", scenario(model, "hot_events")).status_code == 502
+    assert_unavailable(post(client, "scenarios", scenario(model, "hot_events")))
 
 
 @pytest.mark.parametrize("change,code", [({"refusal": "blocked"}, "model_refusal"),
@@ -606,3 +635,12 @@ def test_arbitrary_validator_exception_does_not_leak_private_message(api, monkey
     assert response.status_code == 502
     assert response.json()["data"]["error_message"] == "Model returned invalid structured output"
     assert "private" not in response.text
+
+
+def assert_unavailable(response):
+    assert response.status_code == 200, response.text
+    record = response.json()["data"]
+    assert record["status"] == "succeeded"
+    assert record["assessment_status"] == "unavailable"
+    assert record["result"]["assessment_status"] == "unavailable"
+    assert record["error_code"] is None

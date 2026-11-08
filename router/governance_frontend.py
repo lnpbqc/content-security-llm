@@ -74,7 +74,7 @@ def value_kpis(request: Request, kind: Literal["governance-value"] = Query(...),
     """价值概览使用当前令牌的最新版本结果，按有效样本加权计算均分。"""
     results = _latest_versions(service, kind, token_hash)
     rows = [row for result in results for row in result["samples"]]
-    valid = [row for row in rows if row["score"] is not None]
+    valid = [row for row in rows if row["score"] is not None and row.get("tier") != "unavailable" and row.get("assessment_status") != "unavailable"]
     high = sum(row["tier"] == "high" for row in valid)
     values = [round(sum(row["score"] for row in valid) / len(valid), 1) if valid else 0,
               round(high * 100 / len(valid), 1) if valid else 0,

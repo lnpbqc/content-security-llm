@@ -58,7 +58,7 @@ def invoke_model(request: Request, payload: FrontendInvokeRequest,
     finally:
         slots.release()
     return success(request, {"model_id": result.model_id, "response_type": result.response_type,
-                             "result": result.result})
+                             "result": result.result, **result.assessment})
 
 
 @router.get("/calls")

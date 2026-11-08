@@ -44,11 +44,14 @@ class StructuredOutputTests(unittest.TestCase):
                 return httpx.Response(400, json={"error": {
                     "message": "Unsupported response_format.type", "type": "invalid_request_error",
                 }})
-            if self.status != 200:
-                return httpx.Response(self.status, json={"error": {
+            status = self.status.pop(0) if isinstance(self.status, list) else self.status
+            if status != 200:
+                return httpx.Response(status, json={"error": {
                     "message": "private upstream detail", "type": "invalid_request_error",
                 }})
             content, reasoning = self.content, self.reasoning_content
+            if isinstance(content, list):
+                content = content.pop(0)
             if (self.reasoning_when_thinking and self.requests[-1].get("response_format")
                     and self.requests[-1].get("chat_template_kwargs", {}).get("enable_thinking") is not False):
                 content, reasoning = "", self.content
@@ -69,7 +72,7 @@ class StructuredOutputTests(unittest.TestCase):
         self.manager = ModelManager(None, b"", client_factory=client_factory, cipher=cipher)
 
     def invoke(self, response_model=TextAnswer, **kwargs):
-        return self.manager.invoke("model-test", "check input", response_model,
+        return self.manager.invoke("model-test", kwargs.pop("input", "check input"), response_model,
                                    token_hash="token-test", **kwargs)
 
     def test_schema_reaches_provider_and_valid_result_is_saved(self):
@@ -87,21 +90,16 @@ class StructuredOutputTests(unittest.TestCase):
         self.assertEqual(result.answer, "checked")
         saved = self.calls.create.call_args.kwargs
         self.assertEqual(saved["status"], "success")
-        self.assertEqual(json.loads(saved["output_json"]), {"answer": "checked"})
+        self.assertEqual(json.loads(saved["output_json"]), result.model_dump())
 
     def test_nested_schemas_reach_provider_without_losing_definitions(self):
         self.content = "{}"
         for response_model in (ScenarioOutput, MultilingualSampleOutput):
-            with self.subTest(response_model=response_model.__name__):
-                with self.assertRaises(InvocationError) as raised:
-                    self.invoke(response_model)
-                self.assertEqual(raised.exception.code, "invalid_structured_output")
-                sent = self.requests[-1]["response_format"]
-                self.assertEqual(sent["type"], "json_schema")
-                self.assertEqual(sent["json_schema"]["name"], response_model.__name__)
-                schema = sent["json_schema"]["schema"]
-                self.assertEqual(schema, response_model.model_json_schema())
-                self.assertIn("$defs", schema)
+            result = self.invoke(response_model, input=json.dumps({"scenario_code": "public_opinion", "sampleId": "s1", "sampleRevisionId": "rev1"}))
+            self.assertEqual(result.assessment_status, "unavailable")
+            schema = self.requests[-1]["response_format"]["json_schema"]["schema"]
+            self.assertEqual(schema, response_model.model_json_schema())
+            self.assertIn("$defs", schema)
 
     def test_deepseek_official_chat_uses_supported_json_object_format(self):
         self.accepted_format = "json_object"
@@ -132,22 +130,17 @@ class StructuredOutputTests(unittest.TestCase):
         self.manager.models.get.return_value.base_url = "https://api.deepseek.com/"
         self.accepted_format = "json_object"
         for content in ("{}", '{"answer":"checked","extra":true}'):
-            with self.subTest(content=content):
-                self.content = content
-                with self.assertRaises(InvocationError) as raised:
-                    self.invoke()
-                self.assertEqual(raised.exception.code, "invalid_structured_output")
-                self.assertIsNone(self.calls.create.call_args.kwargs["output_json"])
-
+            self.content = content
+            before = len(self.requests)
+            result = self.invoke()
+            self.assertEqual(result.assessment_status, "unavailable")
+            self.assertEqual(len(self.requests) - before, 2)
         self.content = '{"answer":"checked"}'
-
         def validate(result):
             raise StructuredOutputValidationError("引用来源或原文不匹配")
-
-        with self.assertRaises(InvocationError) as raised:
-            self.invoke(validator=validate)
-        self.assertEqual(raised.exception.code, "invalid_structured_output")
-        self.assertIsNone(self.calls.create.call_args.kwargs["output_json"])
+        result = self.invoke(validator=validate)
+        self.assertEqual(result.assessment_status, "unavailable")
+        self.assertNotEqual(result.answer, "checked")
 
     def test_deepseek_text_generation_does_not_request_json(self):
         self.manager.models.get.return_value.base_url = "https://api.deepseek.com/"
@@ -165,14 +158,61 @@ class StructuredOutputTests(unittest.TestCase):
         self.content = json.dumps(expected, ensure_ascii=False)
         service = InferenceService(self.manager)
         result = service.invoke("model-test", "1111", "anomaly_repair", "token-test")
-        self.assertEqual(result.result, expected)
+        self.assertEqual({k: result.result[k] for k in expected}, expected)
         self.assertEqual(result.response_type, "anomaly_repair")
         self.assertEqual(self.requests[-1]["messages"][-1]["content"], "1111")
         self.assertEqual(self.requests[-1]["response_format"], {"type": "json_object"})
         self.content = "{}"
-        with self.assertRaises(InvocationError) as raised:
-            service.invoke("model-test", "1111", "anomaly_repair", "token-test")
-        self.assertEqual(raised.exception.code, "invalid_structured_output")
+        fallback = service.invoke("model-test", "1111", "anomaly_repair", "token-test")
+        self.assertEqual(fallback.result["assessment_status"], "unavailable")
+        self.assertEqual(fallback.result["fieldChanges"], [])
+
+    def test_model_governance_redacts_before_returning_and_saving_success(self):
+        service = InferenceService(self.manager)
+        original = "顾客张小明，手机号码：13800138000，刚刚下单了一份黄焖鸡米饭。"
+        expected = "顾客[姓名已脱敏]，手机号码：[手机号已脱敏]，刚刚下单了一份黄焖鸡米饭。"
+        for risk in ("high", "low"):
+            with self.subTest(risk=risk):
+                self.content = json.dumps({
+                    "originalOutput": original, "governedOutput": original,
+                    "reason": "订单涉及张小明的个人信息。", "riskLevel": risk,
+                    "reconstruction": None,
+                }, ensure_ascii=False)
+                result = service.invoke("model-test", original, "model_risk_governance", "token-test")
+                self.assertEqual(result.result["originalOutput"], original)
+                self.assertEqual(result.result["governedOutput"], expected)
+                self.assertEqual(result.result["riskLevel"], "high")
+                self.assertNotIn("张小明", result.result["reason"])
+                self.assertIn("已补充脱敏并复检", result.result["reason"])
+                sent = self.requests[-1]["messages"]
+                self.assertIn("实际治理", sent[0]["content"])
+                self.assertIn("[手机号已脱敏]", sent[0]["content"])
+                self.assertEqual(sent[-1]["content"], original)
+                saved = self.calls.create.call_args.kwargs
+                self.assertEqual(saved["status"], "success")
+                self.assertEqual(json.loads(saved["output_json"]), result.result)
+
+    def test_model_governance_unhandled_risk_never_becomes_success_record(self):
+        original = "尚未处理的风险正文。"
+        self.content = json.dumps({"originalOutput": original, "governedOutput": original,
+                                   "reason": "风险尚未处理。", "riskLevel": "high"}, ensure_ascii=False)
+        result = InferenceService(self.manager).invoke("model-test", original, "model_risk_governance", "token-test")
+        self.assertEqual(result.result["assessment_status"], "unavailable")
+        self.assertEqual(result.result["riskLevel"], "unknown")
+        self.assertNotIn(original, result.result["governedOutput"])
+        self.assertEqual(len(self.requests), 2)
+        attempts = self.calls.create.call_args_list
+        self.assertEqual([c.kwargs["status"] for c in attempts], ["error", "error", "success"])
+
+    def test_model_governance_non_sensitive_content_is_not_rewritten(self):
+        original = "今天餐厅正常营业。"
+        expected = {"originalOutput": original, "governedOutput": original,
+                    "reason": "未发现个人信息风险。", "riskLevel": "low", "reconstruction": None}
+        self.content = json.dumps(expected, ensure_ascii=False)
+        result = InferenceService(self.manager).invoke(
+            "model-test", original, "model_risk_governance", "token-test",
+        )
+        self.assertEqual({k: result.result[k] for k in expected}, expected)
 
     def test_qwen_structured_request_disables_thinking_to_keep_json_in_content(self):
         self.manager.models.get.return_value.upstream_model_id = "/data/models/Qwen3-8B"
@@ -203,11 +243,9 @@ class StructuredOutputTests(unittest.TestCase):
         self.manager.models.get.return_value.upstream_model_id = "/data/models/Qwen3-8B"
         self.reasoning_content = '{"answer":"private reasoning"}'
         self.content = ""
-        with self.assertRaises(InvocationError) as raised:
-            self.invoke()
-        self.assertEqual(raised.exception.code, "empty_response")
-        self.assertNotIn("private reasoning", str(raised.exception))
-        self.assertIsNone(self.calls.create.call_args.kwargs["output_json"])
+        result = self.invoke()
+        self.assertEqual(result.assessment_status, "unavailable")
+        self.assertNotIn("private reasoning", result.model_dump_json())
 
     def test_text_generation_does_not_request_json(self):
         self.content = "plain answer"
@@ -217,27 +255,20 @@ class StructuredOutputTests(unittest.TestCase):
         self.assertEqual(self.calls.create.call_args.kwargs["status"], "success")
 
     def test_invalid_provider_output_still_fails_local_validation(self):
-        for content in ('```json\n{"answer":"checked"}\n```', "{}",
-                        '{"answer":"checked","extra":true}'):
-            with self.subTest(content=content):
-                self.content = content
-                with self.assertRaises(InvocationError) as raised:
-                    self.invoke()
-                self.assertEqual(raised.exception.code, "invalid_structured_output")
-                saved = self.calls.create.call_args.kwargs
-                self.assertEqual(saved["status"], "error")
-                self.assertIsNone(saved["output_json"])
+        for content in ('```json\n{"answer":"checked"}\n```', "{}", '{"answer":"checked","extra":true}'):
+            self.content = content
+            before = len(self.requests)
+            result = self.invoke()
+            self.assertEqual(result.assessment_status, "unavailable")
+            self.assertNotEqual(result.answer, "checked")
+            self.assertEqual(len(self.requests) - before, 2)
 
     def test_schema_constraint_does_not_bypass_business_validation(self):
         def validate(result):
-            self.assertEqual(result.answer, "checked")
             raise StructuredOutputValidationError("引用来源或原文不匹配")
-
-        with self.assertRaises(InvocationError) as raised:
-            self.invoke(validator=validate)
-        self.assertEqual(raised.exception.code, "invalid_structured_output")
-        self.assertIn("引用来源或原文不匹配", str(raised.exception))
-        self.assertIsNone(self.calls.create.call_args.kwargs["output_json"])
+        result = self.invoke(validator=validate)
+        self.assertEqual(result.assessment_status, "unavailable")
+        self.assertNotEqual(result.answer, "checked")
 
     def test_provider_rejection_is_reported_without_unconstrained_fallback(self):
         self.status = 400

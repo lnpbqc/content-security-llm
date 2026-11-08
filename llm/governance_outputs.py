@@ -2,6 +2,8 @@
 
 from typing import List, Literal, Optional
 
+from llm.assessment import AssessmentModel
+
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from llm.outputs import AnomalyType, RiskCategory, RiskLevel, ValueDimensionName
@@ -20,7 +22,7 @@ class ValueDimensionOutput(StrictOutput):
     evidence: List[str] = Field(min_length=1, description="至少一段正文中逐字出现的连续引用。0分也需要引用评估所依据的文本，不能使用空数组。")
 
 
-class ValueSampleOutput(StrictOutput):
+class ValueSampleOutput(AssessmentModel):
     """价值分析的单条模型输出；综合分由服务端计算。"""
     sample_id: str = Field(min_length=1)
     status: Literal["scored", "unavailable"]
@@ -61,7 +63,7 @@ class AnomalyFindingOutput(StrictOutput):
     validationResults: List[ValidationOutput]
 
 
-class AnomalyLabelJudgment(StrictOutput):
+class AnomalyLabelJudgment(AssessmentModel):
     """先判断主题关系，不要求寻找异常或给出替换标签。"""
     sampleId: str = Field(min_length=1)
     sampleRevisionId: str = Field(min_length=1)
@@ -72,7 +74,7 @@ class AnomalyLabelJudgment(StrictOutput):
     reason: str = Field(min_length=1, description="解释为什么主题属于、不属于或无法确定属于标签范围。")
 
 
-class AnomalySampleOutput(StrictOutput):
+class AnomalySampleOutput(AssessmentModel):
     """异常治理的单条模型输出。"""
     sampleId: str = Field(min_length=1)
     sampleRevisionId: str = Field(min_length=1)
@@ -103,7 +105,7 @@ class RiskFindingOutput(StrictOutput):
     evidenceRefs: List[str] = Field(min_length=1)
 
 
-class RiskSampleOutput(StrictOutput):
+class RiskSampleOutput(AssessmentModel):
     """风险分级的单条模型输出；汇总等级由服务端计算。"""
     sampleId: str = Field(min_length=1)
     sampleRevisionId: str = Field(min_length=1)
@@ -127,7 +129,7 @@ class SemanticWeights(StrictOutput):
 
     @model_validator(mode="after")
     def check_total(self) -> "SemanticWeights":
-        if abs(self.safe + self.neutral + self.risk - 1) > 0.001:
+        if min(abs(self.safe + self.neutral + self.risk - 1), abs(self.safe + self.neutral + self.risk)) > 0.001:
             raise ValueError("semantic weights must sum to 1")
         return self
 
@@ -137,7 +139,7 @@ class SemanticEvidence(StrictOutput):
     reason: str = Field(min_length=1)
 
 
-class MultilingualSampleOutput(StrictOutput):
+class MultilingualSampleOutput(AssessmentModel):
     sampleId: str = Field(min_length=1)
     sampleRevisionId: str = Field(min_length=1)
     status: Literal["assessed", "unassessable"]
@@ -149,10 +151,12 @@ class MultilingualSampleOutput(StrictOutput):
     @model_validator(mode="after")
     def check_status(self) -> "MultilingualSampleOutput":
         if self.status == "assessed":
-            if self.semanticWeights is None or self.riskScore is None or self.unassessableReason:
+            if (self.semanticWeights is None or self.riskScore is None or self.unassessableReason or
+                    abs(self.semanticWeights.safe + self.semanticWeights.neutral + self.semanticWeights.risk - 1) > 0.001):
                 raise ValueError("assessed output requires weights and risk score")
             if self.riskScore >= 0.5 and not self.evidence:
                 raise ValueError("medium or high risk requires source evidence")
-        elif self.semanticWeights is not None or self.riskScore is not None or self.evidence or not self.unassessableReason:
+        elif ((self.semanticWeights is not None and any((self.semanticWeights.safe, self.semanticWeights.neutral, self.semanticWeights.risk)))
+              or self.riskScore not in (None, 0) or self.evidence or not self.unassessableReason):
             raise ValueError("unassessable output requires only a reason")
         return self

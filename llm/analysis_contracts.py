@@ -2,6 +2,8 @@
 
 from typing import Annotated, Literal, Optional, Union
 
+from llm.assessment import AssessmentModel
+
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator, model_validator
 
 Text = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
@@ -132,7 +134,7 @@ Details = Annotated[Union[PublicOpinionDetails, HotEventsDetails, CrossCulturalD
                     Field(discriminator="type")]
 
 
-class ScenarioOutput(StrictModel):
+class ScenarioOutput(AssessmentModel):
     scenario_code: ScenarioCode
     summary: Text
     risk_level: Risk
@@ -232,7 +234,7 @@ class AuditCheck(StrictModel):
     evidence: list[Citation]
 
 
-class ReasoningAuditOutput(StrictModel):
+class ReasoningAuditOutput(AssessmentModel):
     audit_type: Literal["reasoning"]
     subject: AuditSubject
     risk_nodes: list[AuditFinding]
@@ -241,7 +243,7 @@ class ReasoningAuditOutput(StrictModel):
     verification_state: Literal["unverified"]
 
 
-class ChainAuditOutput(StrictModel):
+class ChainAuditOutput(AssessmentModel):
     audit_type: Literal["full_chain"]
     subject: AuditSubject
     checks: list[AuditCheck]

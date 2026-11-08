@@ -263,7 +263,7 @@ def value_samples(request: Request, result_id: str, page: int = Query(1, ge=1),
         raise HTTPException(422, detail={"code": "invalid_filter", "message": "评分筛选条件无效"})
     rows = [row for row in rows if (tier == "all" or row["tier"] == tier) and
             (not keyword or keyword in row["id"] + row["text"]) and
-            (not bin or row["score"] is not None and str(min(4, int(row["score"] // 20))) == bin)]
+            (not bin or row["tier"] != "unavailable" and row["score"] is not None and str(min(4, int(row["score"] // 20))) == bin)]
     if sort_by is not None or sort_order is not None:
         if sort_by not in {"score", "tier"} or sort_order not in {"asc", "desc"}:
             raise HTTPException(422, detail={"code": "invalid_sort", "message": "评分排序条件无效"})
@@ -273,7 +273,7 @@ def value_samples(request: Request, result_id: str, page: int = Query(1, ge=1),
         rows.sort(key=lambda row: (row["score"] if row["score"] is not None else 0)
                   if sort_by == "score" else ranks.get(row["tier"], -1),
                   reverse=sort_order == "desc")
-        rows.sort(key=lambda row: row["score"] is None)
+        rows.sort(key=lambda row: row["tier"] == "unavailable" or row["score"] is None)
     return success(request, _page(rows, page, page_size))
 
 
@@ -413,7 +413,7 @@ def risk_samples(request: Request, result_id: str, page: int = Query(1, ge=1),
             raise HTTPException(422, detail={"code": "invalid_sort", "message": "风险排序条件无效"})
         ranks = {"NOTICE": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3}
         rows.sort(key=lambda row: row["id"])
-        rows.sort(key=lambda row: ranks[row["maximum_suggested_level"]] if sort_by == "maximum_suggested_level"
+        rows.sort(key=lambda row: ranks.get(row["maximum_suggested_level"], -1) if sort_by == "maximum_suggested_level"
                   else row["status"], reverse=sort_order == "desc")
     return success(request, _page(rows, page, page_size))
 

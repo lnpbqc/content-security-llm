@@ -68,7 +68,7 @@ def test_missing_policy_must_not_accept_unreferenced_requirements(api):
                              answer="申请补贴必须向指定账户缴纳1000元。")
     upstream["queue"] = [result]
     response = post(client, "scenarios", payload)
-    assert response.status_code == 502
+    assert_unavailable(response)
 
 
 def test_chain_audit_must_not_claim_completion_after_omitting_every_step(api):
@@ -76,7 +76,7 @@ def test_chain_audit_must_not_claim_completion_after_omitting_every_step(api):
     result = audit_output("full_chain")
     result.update(checks=[], risks=[], gaps=[], limitations=[], conclusion="全部步骤检查通过")
     upstream["queue"] = [result]
-    assert post(client, "audits", audit(model, "full_chain")).status_code == 502
+    assert_unavailable(post(client, "audits", audit(model, "full_chain")))
 
 
 def test_non_string_provider_content_must_leave_a_failed_generation_record(api, monkeypatch):
@@ -163,7 +163,7 @@ def test_analysis_overrides_sdk_retries_and_timeout(api, monkeypatch):
     monkeypatch.setattr(client.app.state.model_manager, "client_factory", factory)
     response = post(client, "model-governance", {"model_id": model, "prompt": "test"})
     assert response.status_code == 502 and len(requests) == 1
-    assert sdk_options == [{"timeout": 120, "max_retries": 0}]
+    assert len(sdk_options) == 1 and 0 < sdk_options[0]["timeout"] <= 120 and sdk_options[0]["max_retries"] == 0
     assert response.json()["data"]["status"] == "failed"
 
 

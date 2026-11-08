@@ -25,7 +25,8 @@ class CallPublic(BaseModel):
             id=record.id,
             model_id=record.model_id,
             input=record.input,
-            output=json.loads(record.output_json) if record.output_json is not None else None,
+            output=(None if record.output_json and "_diagnostics" in json.loads(record.output_json) else
+                    json.loads(record.output_json) if record.output_json is not None else None),
             response_type=record.response_type,
             status=record.status,
             error_code=record.error_code,

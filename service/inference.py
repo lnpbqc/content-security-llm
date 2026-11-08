@@ -4,7 +4,9 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 from llm.models import ModelManager
+from llm.assessment import metadata
 from llm.outputs import get_response_type, list_response_types
+from service.privacy_guard import enforce_privacy
 
 
 class UnknownResponseTypeError(Exception):
@@ -16,6 +18,10 @@ class InvocationResult:
     model_id: str
     response_type: str
     result: Dict[str, Any]
+
+    @property
+    def assessment(self):
+        return metadata(self.result)
 
 
 class InferenceService:
@@ -36,6 +42,8 @@ class InferenceService:
             options["timeout"] = timeout
         if max_retries is not None:
             options["max_retries"] = max_retries
+        if response_type == "model_risk_governance":
+            options["validator"] = lambda output: enforce_privacy(output, input)
         parsed = self.manager.invoke(
             model_id, input, response_model, response_type=response_type,
             token_hash=token_hash, **options,

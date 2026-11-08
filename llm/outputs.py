@@ -2,6 +2,8 @@
 
 from typing import Dict, List, Literal, Optional, Type
 
+from llm.assessment import AssessmentModel
+
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
@@ -11,25 +13,25 @@ RiskCategory = Literal["个人信息暴露", "误导信息", "仇恨歧视", "�
 RiskLevel = Literal["HIGH", "MEDIUM", "LOW", "NOTICE"]
 
 
-class TextAnswer(BaseModel):
+class TextAnswer(AssessmentModel):
     model_config = ConfigDict(extra="forbid")
 
     answer: str
 
-class JudgementAnswer(BaseModel):
+class JudgementAnswer(AssessmentModel):
     model_config = ConfigDict(extra="forbid")
 
-    score: float
+    score: float = Field(allow_inf_nan=False)
 
     reason: str
 
-class ModelRiskGovernanceOutput(BaseModel):
+class ModelRiskGovernanceOutput(AssessmentModel):
     model_config = ConfigDict(extra="forbid")
 
-    originalOutput: str
-    governedOutput: str
-    reason: str
-    riskLevel: Literal["high", "medium", "low"]
+    originalOutput: str = Field(min_length=1, description="治理前原始正文，保留原文供审计对照")
+    governedOutput: str = Field(min_length=1, description="实际治理后的正文，个人敏感信息须脱敏")
+    reason: str = Field(min_length=1, description="原文风险及实际处理依据，不重复敏感原值")
+    riskLevel: Literal["high", "medium", "low", "unknown"] = Field(description="治理前原始正文的风险等级")
     reconstruction: Optional[str] = None
 
 
@@ -50,13 +52,13 @@ class SemanticRiskEvidence(BaseModel):
     feature: str
 
 
-class SemanticRiskOutput(BaseModel):
+class SemanticRiskOutput(AssessmentModel):
     model_config = ConfigDict(extra="forbid")
 
     findings: List[SemanticRiskFinding]
     evidence: List[SemanticRiskEvidence]
     primaryCategory: str
-    maximumSuggestedLevel: RiskLevel
+    maximumSuggestedLevel: Literal["HIGH", "MEDIUM", "LOW", "NOTICE", "UNKNOWN"]
 
 
 class ValueScoreDimension(BaseModel):
@@ -68,7 +70,7 @@ class ValueScoreDimension(BaseModel):
     evidence: List[str]
 
 
-class ValueScoreOutput(BaseModel):
+class ValueScoreOutput(AssessmentModel):
     model_config = ConfigDict(extra="forbid")
 
     dimensions: List[ValueScoreDimension] = Field(min_length=5, max_length=5)
@@ -116,7 +118,7 @@ class ValidationResult(BaseModel):
     passed: bool
 
 
-class AnomalyRepairOutput(BaseModel):
+class AnomalyRepairOutput(AssessmentModel):
     model_config = ConfigDict(extra="forbid")
 
     findings: List[AnomalyFinding]
@@ -142,7 +144,7 @@ class FullChainGap(BaseModel):
     reason: str
 
 
-class FullChainAuditOutput(BaseModel):
+class FullChainAuditOutput(AssessmentModel):
     model_config = ConfigDict(extra="forbid")
 
     conclusion: str
@@ -168,7 +170,7 @@ class RiskNode(BaseModel):
     evidenceRefs: List[str]
 
 
-class ReasoningAuditOutput(BaseModel):
+class ReasoningAuditOutput(AssessmentModel):
     model_config = ConfigDict(extra="forbid")
 
     steps: List[ReasoningStep]

@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from db.governance import GovernanceRepository
 from db.governance_config import GovernanceConfigRepository
 from llm.governance_outputs import AnomalyLabelJudgment, AnomalyRepairOutput, AnomalySampleOutput, MultilingualSampleOutput, RiskSampleOutput, ValueSampleOutput
+from llm.assessment import metadata, UNAVAILABLE
 from llm.models import InvocationError, ModelManager, ModelNotFoundError
 from llm.structured_output import StructuredOutputValidationError
 from service.governance_data import BusinessGovernanceData
@@ -188,7 +189,7 @@ class GovernanceService:
             validator=check_judgment, temperature=0, timeout=120, max_retries=0,
         ).model_dump(mode="json")
         base = {"sampleId": sample["id"], "sampleRevisionId": sample["revision_id"],
-                "labelJudgment": judgment, "findings": []}
+                "labelJudgment": judgment, "findings": [], **metadata(judgment)}
         if judgment["relation"] == "compatible":
             return {**base, "status": "assessed", "unavailableReason": None}
         if judgment["relation"] == "uncertain":
@@ -336,7 +337,27 @@ class GovernanceService:
                 not finding["reason"].strip()):
                 raise StructuredOutputValidationError("风险证据：类别、规则编号或规则版本不匹配")
 
-    def _snapshot(self, task: Dict[str, Any], policy: Dict[str, Any],
+    def _snapshot(self, task, policy, samples, outcomes, result_id):
+        summary, rows = self._build_snapshot(task, policy, samples, outcomes, result_id)
+        for row in rows:
+            output = (outcomes.get(row["id"]) or {}).get("output") or {}
+            row.update(metadata(output))
+            if row.get("tier") == "unavailable":
+                row.update(score=0, assessment_status="unavailable", unavailable_fields=["score", "dimensions"],
+                           assessment_reason=output.get("unavailable_reason") or UNAVAILABLE)
+                if not row["dimensions"]:
+                    row["dimensions"] = [dict(name=d["name"], score=0, reason=UNAVAILABLE, evidence=[])
+                                         for d in policy["dimensions"]]
+            if row.get("status") == "无法评估":
+                row["maximum_suggested_level"] = "UNKNOWN"
+        valid = summary.get("valid_count", 0)
+        unavailable = summary.get("unavailable_count", summary.get("unassessable_count", 0))
+        summary.update(assessment_status="unavailable" if not valid else "partial" if unavailable or summary.get("failed_count") else "assessed",
+                       unavailable_fields=["mean_score"] if not valid and task["kind"] == "governance-value" else [],
+                       assessment_reason="无有效评分，资料不足，无法判断" if not valid else "部分样本无法判断" if unavailable else None)
+        return summary, rows
+
+    def _build_snapshot(self, task: Dict[str, Any], policy: Dict[str, Any],
                   samples: List[Dict[str, Any]], outcomes: Dict[str, Dict[str, Any]],
                   result_id: str):
         """选择对应任务的汇总方式，生成前端可读取的快照。"""
@@ -380,15 +401,15 @@ class GovernanceService:
             output = outcome["output"]
             row = {"id": sample["id"], "text": sample["text"], "language": sample["language"],
                    "score": None, "tier": "unavailable", "dimensions": output["dimensions"]}
-            if output["status"] == "scored":
+            if output["status"] == "scored" and not output.get("unavailable_fields"):
                 scores = {dimension["name"]: dimension["score"] for dimension in output["dimensions"]}
                 row["score"] = round(sum(scores[d["name"]] * d["weight"] for d in policy["dimensions"]), 1)
                 row["tier"] = ("high" if row["score"] >= policy["high_threshold"] else
                                "medium" if row["score"] >= policy["medium_threshold"] else "low")
             else:
-                row["unavailable_reason"] = output["unavailable_reason"]
+                row["unavailable_reason"] = output.get("unavailable_reason") or UNAVAILABLE
             rows.append(row)
-        valid = [row for row in rows if row["score"] is not None]
+        valid = [row for row in rows if row["tier"] != "unavailable"]
         dimensions = []
         for definition in policy["dimensions"] if valid else []:
             name = definition["name"]
@@ -400,7 +421,7 @@ class GovernanceService:
                  "count": sum(1 for row in valid if min(4, int(row["score"] // 20)) == i)} for i in range(5)]
         summary = self._base_summary(task, result_id)
         summary.update({"language_name": task["scope"]["language"], "scheme_name": policy["name"],
-                        "mean_score": round(sum(row["score"] for row in valid) / len(valid), 1) if valid else None,
+                        "mean_score": round(sum(row["score"] for row in valid) / len(valid), 1) if valid else 0,
                         "valid_count": len(valid), "high_count": sum(row["tier"] == "high" for row in valid),
                         "unavailable_count": len(rows) - len(valid), "failed_count": failed, "failed_samples": failed_samples,
                         "target_count": len(samples), "languages": sorted({row["language"] for row in rows}),
@@ -507,7 +528,7 @@ class GovernanceService:
                            "color": definition["color"], "count": count,
                            "percent": round(count / len(risk_rows) * 100, 1) if risk_rows else 0})
         summary = self._base_summary(task, result_id)
-        labeled = [sample for sample in samples if "reference_risk_level" in sample["metadata"]]
+        labeled = [sample for sample in samples if "reference_risk_level" in sample["metadata"] and sample["id"] in predicted_levels]
         correct = sum(predicted_levels.get(sample["id"]) == sample["metadata"]["reference_risk_level"]
                       for sample in labeled)
         summary.update({"status": "已完成", "valid_count": valid, "risk_count": len(risk_rows),

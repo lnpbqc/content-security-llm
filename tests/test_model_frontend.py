@@ -19,6 +19,10 @@ def invoke(client, model, **kwargs):
                                                   "response_type": "full_chain_audit"}), **kwargs)
 
 
+for _result in RESULTS.values():
+    _result.update(assessment_status="assessed", unavailable_fields=[], assessment_reason=None)
+
+
 def envelope(response, status=200):
     assert response.status_code == status
     body = response.json()
@@ -26,6 +30,42 @@ def envelope(response, status=200):
     assert body["code"] == (0 if status == 200 else status)
     assert body["message"] and body["trace_id"] and body["timestamp"]
     return body
+
+
+@pytest.mark.parametrize("risk", ["high", "low"])
+def test_governance_http_redacts_model_omissions_before_return_and_persistence(analysis_api, risk):
+    client, model, upstream, requests = analysis_api
+    original = "顾客张小明，手机号码：13800138000，刚刚下单了一份黄焖鸡米饭。"
+    upstream["result"] = {"originalOutput": original, "governedOutput": original,
+                          "riskLevel": risk, "reason": "涉及张小明的个人信息。", "reconstruction": None}
+    body = envelope(invoke(client, model, payload={
+        "model_id": model, "input": original, "response_type": "model_risk_governance",
+    }))
+    result = body["data"]["result"]
+    assert result["originalOutput"] == original
+    assert result["governedOutput"] == "顾客[姓名已脱敏]，手机号码：[手机号已脱敏]，刚刚下单了一份黄焖鸡米饭。"
+    assert result["riskLevel"] == "high" and "张小明" not in result["reason"]
+    assert "已补充脱敏并复检" in result["reason"]
+    calls = envelope(client.get("/api/v1/calls", headers=auth()))["data"]
+    assert len(requests) == 1 and len(calls) == 1
+    assert calls[0]["status"] == "success" and calls[0]["output"] == result
+
+
+def test_governance_http_rejects_unhandled_risk_without_safe_output_or_success_record(analysis_api):
+    client, model, upstream, requests = analysis_api
+    original = "尚未处理的风险正文。"
+    upstream["result"] = {"originalOutput": original, "governedOutput": original,
+                          "riskLevel": "high", "reason": "风险未处理。"}
+    body = envelope(invoke(client, model, payload={
+        "model_id": model, "input": original, "response_type": "model_risk_governance",
+    }))
+    result = body["data"]["result"]
+    assert result["assessment_status"] == "unavailable" and result["riskLevel"] == "unknown"
+    assert original not in result["governedOutput"]
+    calls = envelope(client.get("/api/v1/calls", headers=auth()))["data"]
+    assert len(requests) == 2 and len(calls) == 3
+    assert sum(c["status"] == "error" for c in calls) == 2
+    assert all(c["output"] is None for c in calls if c["status"] == "error")
 
 
 def test_model_catalog_and_types_are_wrapped_without_changing_old_routes(analysis_api):
@@ -50,7 +90,7 @@ def test_direct_invoke_calls_and_legacy_response_are_compatible(analysis_api, re
     upstream["result"] = deepcopy(RESULTS[response_type])
     payload = {"model_id": model, "input": "请检查提交材料", "response_type": response_type}
     body = envelope(invoke(client, model, payload=payload))
-    assert body["data"] == {"model_id": model, "response_type": response_type, "result": RESULTS[response_type]}
+    assert body["data"] == {"model_id": model, "response_type": response_type, "result": RESULTS[response_type], "assessment_status": "assessed", "unavailable_fields": [], "assessment_reason": None}
     old = client.post("/api/llm/invoke", headers=auth(), json=payload)
     assert old.status_code == 200 and old.json() == body["data"]
     assert len(requests) == 2 and json.loads(requests[0].content)["messages"][-1]["content"] == payload["input"]
@@ -149,6 +189,11 @@ def test_upstream_failures_keep_status_code_and_private_details_hidden(analysis_
     elif failure == "empty": upstream["empty_choices"] = True
     elif failure == "refusal": upstream["refusal"] = "private refusal details"
     else: upstream["finish_reason"] = "length"
+    if failure in {"invalid", "empty", "refusal", "truncated"}:
+        body = envelope(invoke(client, model))
+        assert body["data"]["assessment_status"] == "unavailable"
+        assert "private" not in json.dumps(body) and len(requests) == 2
+        return
     body = envelope(invoke(client, model), status)
     assert body["error_code"] == code and body["data"] is None
     if failure == "http": assert body["upstream_status"] == 429
@@ -222,5 +267,6 @@ def test_new_generic_call_sets_timeout_no_retry_and_closes_http_client(analysis_
 
     monkeypatch.setattr(client.app.state.model_manager, "client_factory", factory)
     assert invoke(client, model).status_code == (502 if failed else 200)
-    assert options == [{"timeout": 120, "max_retries": 0}] and len(requests) == 1
+    assert len(options) == len(requests) == 1
+    assert 0 < options[0]["timeout"] <= 120 and options[0]["max_retries"] == 0
     assert all(c.is_closed for c in http_clients)

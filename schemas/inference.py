@@ -5,6 +5,7 @@ from typing import Any, Dict
 from pydantic import BaseModel, Field
 
 from llm.analysis_contracts import InputText
+from llm.assessment import AssessmentModel
 
 
 class InvokeRequest(BaseModel):
@@ -13,7 +14,7 @@ class InvokeRequest(BaseModel):
     response_type: str = Field(min_length=1)
 
 
-class InvokeResponse(BaseModel):
+class InvokeResponse(AssessmentModel):
     model_id: str
     response_type: str
     result: Dict[str, Any]

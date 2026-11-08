@@ -42,4 +42,5 @@ def invoke_model(payload: InvokeRequest,
         model_id=result.model_id,
         response_type=result.response_type,
         result=result.result,
+        **result.assessment,
     )

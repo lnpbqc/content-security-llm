@@ -1,5 +1,7 @@
 """由逐样本模型估计汇总多语种语义权重和风险分层。"""
 
+from llm.assessment import metadata, UNAVAILABLE
+
 from itertools import combinations
 from math import log2
 
@@ -38,14 +40,16 @@ def build_snapshot(base, policy, samples, outcomes, mask_text, previous=None):
         row = {"id": sample["id"], "dataset_id": sample["dataset_id"],
                "version_id": sample["version_id"], "revision_id": sample["revision_id"],
                "text": mask_text(sample["text"]), "language": sample["language"],
-               "status": output["status"], "semantic_weights": output["semanticWeights"],
+               "status": output["status"] if not output.get("unavailable_fields") else "unassessable", **metadata(output), "semantic_weights": output["semanticWeights"],
                "risk_score": output["riskScore"], "risk_level": "unknown",
                "evidence": output["evidence"]}
-        if output["status"] == "assessed":
+        if row["status"] == "assessed":
             row["risk_level"] = risk_level(output["riskScore"], policy["thresholds"])
         else:
             unassessable += 1
-            row["unassessable_reason"] = output["unassessableReason"]
+            row["unassessable_reason"] = output.get("unassessableReason") or UNAVAILABLE
+            row["risk_score"] = 0
+            row["semantic_weights"] = {"safe": 0, "neutral": 0, "risk": 0}
         rows.append(row)
 
     valid = [row for row in rows if row["status"] == "assessed"]
@@ -85,19 +89,19 @@ def build_snapshot(base, policy, samples, outcomes, mask_text, previous=None):
                "thresholds": policy["thresholds"],
                "target_count": len(samples), "valid_count": len(valid),
                "unassessable_count": unassessable, "failed_count": failed,
-               "overall_risk_score": round(mean_score, 2) if mean_score is not None else None,
+               "overall_risk_score": round(mean_score, 2) if mean_score is not None else 0,
                "overall_risk_level": (risk_level(mean_score, policy["thresholds"])
                                       if mean_score is not None else "unknown"),
                "semantic_consistency": consistency,
                "semantic_consistency_method": "pairwise_jensen_shannon_similarity",
-               "high_risk_semantic_weight": high_weight,
+               "high_risk_semantic_weight": high_weight if high_weight is not None else 0,
                "covered_language_count": len(by_language),
                "language_distribution": language_distribution,
                "risk_distribution": distribution, "risk_evidence": evidence[:20],
                "semantic_consistency_delta": (round(consistency - previous["semantic_consistency"], 2)
-                                              if consistency is not None and previous and
+                                              if consistency is not None and previous and previous.get("valid_count", 1) > 0 and
                                               previous.get("semantic_consistency") is not None else None),
                "high_risk_semantic_weight_delta": (round(high_weight - previous["high_risk_semantic_weight"], 1)
-                                                   if high_weight is not None and previous and
+                                                   if high_weight is not None and previous and previous.get("valid_count", 1) > 0 and
                                                    previous.get("high_risk_semantic_weight") is not None else None)}
     return summary, rows
