@@ -90,6 +90,8 @@ def create_app(
     application.include_router(ethnic_multilingual_router)
     application.include_router(neural_trace_router)
     application.include_router(model_frontend_router)
+    from router.agent_runtime import router as agent_runtime_router
+    application.include_router(agent_runtime_router)
     application.include_router(model_evaluation_router)
 
     @application.exception_handler(HTTPException)
