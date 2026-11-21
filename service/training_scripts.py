@@ -120,3 +120,26 @@ def prepare_script_task(payload):
             "inputs": inputs, "parameters": parameters,
             "data_version": payload.data_version,
             "python_source": script.path.read_text(encoding="utf-8")}
+
+
+
+class QwenLoraInputs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class QwenLoraParameters(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, allow_inf_nan=False)
+
+    epochs: int = Field(default=1, ge=1, le=100)
+    learning_rate: float = Field(default=0.0002, gt=0, le=1)
+    batch_size: Literal[1] = 1
+
+
+SCRIPTS["qwen-pollution-lora"] = ScriptDefinition(
+    name="Qwen2.5 0.5B 污染识别 LoRA",
+    description="从选中的数据集版本读取正文、主题标签和污染标注，执行 CPU LoRA 微调。",
+    path=PROJECT_ROOT / "training_scripts" / "qwen_pollution_lora.py",
+    inputs=QwenLoraInputs,
+    parameters=QwenLoraParameters,
+    dataset_key="qwen-pollution-60",
+)

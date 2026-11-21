@@ -465,6 +465,83 @@ def test_governance_empty_query_scope_is_422(app_client, field, scheme, name):
     assert business.connections == 0 and FakeCompletionClient.calls == []
 
 
+def test_anomaly_pollution_rate_uses_only_valid_gold_positive_samples():
+    from service.governance import GovernanceService
+
+    source = SimpleNamespace(dataset_name=lambda *_: "污染检测测试")
+    service = GovernanceService(None, source, None, None)
+    scope = {"dataset_id": 1, "version_id": "v1.0.0", "scheme_id": "anomaly-basic-v2.1", "language": "all"}
+    task = {"id": "task", "scope": scope}
+    references = [True, True, False, None, True, True]
+    samples = [
+        {"id": str(i), "dataset_id": 1, "version_id": "v1.0.0", "revision_id": f"ref:{i}",
+         "text": f"样本 {i}", "language": "zh", "metadata": {"reference_is_anomaly": reference}}
+        for i, reference in enumerate(references)
+    ]
+    finding = {"type": "标签异常", "field": "topic_label", "reason": "正文与标签冲突",
+               "quote": "样本", "ruleId": "anomaly-rule-1", "fieldChanges": []}
+    outcomes = {
+        "0": {"status": "success", "output": {"status": "assessed", "findings": [finding]}},
+        "1": {"status": "success", "output": {"status": "assessed", "findings": []}},
+        "2": {"status": "success", "output": {"status": "assessed", "findings": [finding]}},
+        "3": {"status": "success", "output": {"status": "assessed", "findings": [finding]}},
+        "4": {"status": "success", "output": {"status": "unavailable", "findings": [], "unavailableReason": "资料不足"}},
+        "5": {"status": "error"},
+    }
+    summary, _ = service._anomaly_snapshot(task, {"types": ["标签异常"]}, samples, outcomes, "result")
+    assert summary["pollution_identification"] == {
+        "correct_count": 1, "total_count": 2, "valid_count": 4,
+    }
+
+
+def test_anomaly_pollution_overview_aggregates_latest_counts_and_handles_legacy_results():
+    from fastapi import Request
+    from router.governance_frontend import anomaly_overview
+
+    def result(dataset_id, valid, counts=None):
+        summary = {"valid_count": valid, "unavailable_count": 0, "failed_count": 0, "anomaly_count": 0}
+        if counts:
+            summary["pollution_identification"] = dict(zip(("correct_count", "total_count"), counts))
+        return {"scope": {"dataset_id": dataset_id, "version_id": "v1.0.0"}, "summary": summary}
+
+    def read(kind, token):
+        assert kind == "governance-anomaly" and token == "test-token"
+        return [result(1, 3, (1, 2)), result(1, 100, (50, 50)), result(2, 10, (8, 8)), result(3, 5)]
+
+    service = SimpleNamespace(repository=SimpleNamespace(list_result_summaries=read))
+    request = Request({"type": "http", "headers": []})
+    assert anomaly_overview(request, "governance-anomaly", service, "test-token")["data"]["pollution_identification"] == {
+        "correct_count": 9, "total_count": 10, "valid_count": 18,
+    }
+
+
+def test_risk_v2_exposes_calibrated_boundaries_without_changing_v1():
+    from fastapi import Request
+    from router.governance_frontend import risk_options
+    from service.governance import GovernanceService
+    from service.governance_data import BusinessGovernanceData
+
+    data = BusinessGovernanceData(SimpleNamespace(connect=lambda: None))
+    service = GovernanceService(None, data, None, None)
+    options = risk_options(Request({"type": "http", "headers": []}), service)["data"]
+    assert options["default_scope"]["scheme_id"] == "risk-v1"
+    assert [scheme["id"] for scheme in options["schemes"]] == ["risk-v1", "risk-v2"]
+
+    sample = {
+        "id": "1", "revision_id": "r1", "language": "zh",
+        "metadata": {"text": "公开页显示读者账号和注册月份。", "reference_risk_level": "low"},
+    }
+    v1 = data.policy("governance-risk", "risk-v1")
+    v2 = data.policy("governance-risk", "risk-v2")
+    base = service._model_input("governance-risk", sample, v1)
+    calibrated = service._model_input("governance-risk", sample, v2)
+    assert base["rules"] == calibrated["rules"]
+    assert "账号和粗粒度登记时间" not in base["instructions"]
+    assert calibrated["instructions"] == base["instructions"] + v2["instructions"]
+    assert options["schemes"][1]["levels"] == calibrated["levels"]
+    assert "reference_risk_level" not in calibrated and "metadata" not in calibrated
+
+
 def test_risk_options_only_advertise_categories_with_valid_rules(app_client):
     app, client, _, _ = app_client
     service = app.state.governance_service
@@ -1476,6 +1553,22 @@ def test_risk_weight_accuracy_uses_labeled_risk_predictions_and_latest_scope(app
     base = "/api/v1/data-governance/risk-results/" + result_id
     summary = client.get(base, headers=headers()).json()["data"]
     assert (summary["accuracy_correct_count"], summary["accuracy_test_count"]) == (4, 7)
+    all_samples = client.get(base + "/samples", headers=headers()).json()["data"]
+    assert all_samples["total"] == 7
+    candidates = client.get(base + "/samples", headers=headers(), params={
+        "candidates_only": True, "page_size": 1,
+        "sort_by": "maximum_suggested_level", "sort_order": "asc",
+    }).json()["data"]
+    assert candidates["total"] == summary["risk_count"] == 4
+    assert [row["id"] for row in candidates["items"]] == ["3"]
+    notices = client.get(base + "/samples", headers=headers(), params={
+        "candidates_only": True, "level": "NOTICE",
+    }).json()["data"]
+    assert [row["id"] for row in notices["items"]] == ["3"]
+    exported = client.post(base + "/export", headers=headers(), json={
+        "candidates_only": True,
+    }).json()["data"]
+    assert {row["id"] for row in exported} == {"2", "3", "7", "8"}
     assert client.get(base + "/weight-accuracy", headers=headers()).json()["data"].items() >= {
         "accuracyPercent": 57.1, "correctCount": 4, "totalCount": 7}.items()
     assert client.get(base + "/weight-accuracy", headers=headers("b")).status_code == 404

@@ -5,7 +5,9 @@ from typing import Any, Dict, Literal
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 
 from router.dependencies import require_token
-from router.governance import get_service, query_scope, success, _get_result, value_kind, anomaly_kind, risk_kind
+from router.governance import (
+    get_service, query_scope, success, _get_result, _filter_risk_samples, value_kind, anomaly_kind, risk_kind,
+)
 from service.governance import GovernanceService
 
 
@@ -54,14 +56,15 @@ def governance_options(request: Request, kind: str = Query(...),
 @router.get("/data-governance/risk-options", dependencies=[risk_kind])
 def risk_options(request: Request, service: GovernanceService = Depends(get_service)):
     """给风险页提供分级方案、筛选选项和已有只读动作。"""
-    policy = service.data.policy("governance-risk", "risk-v1")
+    policies = [service.data.policy("governance-risk", scheme_id)
+                for scheme_id in ("risk-v1", "risk-v2")]
     return success(request, {
         "datasets": [],
         "schemes": [{"id": policy["scheme_id"], "name": policy["name"],
-                     "levels": policy["levels"]}],
-        "categories": policy["categories"], "page_sizes": [5, 10, 20],
+                     "levels": policy["levels"]} for policy in policies],
+        "categories": policies[0]["categories"], "page_sizes": [5, 10, 20],
         "default_scope": {"dataset_id": 0, "version_id": "", "language": "all",
-                          "scheme_id": policy["scheme_id"]},
+                          "scheme_id": policies[0]["scheme_id"]},
         "actions": ["detect", "history"], "review_statuses": ["未发起", "待复核", "无法评估"],
         "review_decisions": [], "reviewers": [], "read_only": True,
     })
@@ -95,12 +98,18 @@ def anomaly_overview(request: Request, kind: Literal["governance-anomaly"] = Que
     """异常概览只统计已保存的检测结果，不虚构人工复核或修复数量。"""
     results = _latest_versions(service, kind, token_hash, summary_only=True)
     summaries = [result["summary"] for result in results]
+    pollution = [row.get("pollution_identification") or {} for row in summaries]
     values = [sum(row["valid_count"] + row["unavailable_count"] + row["failed_count"] for row in summaries),
               sum(row["anomaly_count"] for row in summaries), 0, 0]
     labels = ["已检测语料", "检出异常", "待复核样本", "已完成修复"]
     return success(request, {
         "cards": [{"label": label, "value": value, "icon": "Document"}
                   for label, value in zip(labels, values)],
+        "pollution_identification": {
+            "correct_count": sum(row.get("correct_count", 0) for row in pollution),
+            "total_count": sum(row.get("total_count", 0) for row in pollution),
+            "valid_count": sum(row["valid_count"] for row in summaries),
+        },
         "definitions": ["仅统计当前访问令牌产生的结果；同一数据集版本取最近一次已保存分析，不累加重复分析。",
                         "本服务只提供检测和建议，不提供复核工单或修复应用，相关数量为零。"],
     })
@@ -135,9 +144,7 @@ def export_risk(request: Request, result_id: str, payload: Dict[str, Any] = Body
     """导出当前保存结果的全部匹配样本，不调用模型、不受分页窗口影响。"""
     rows = _get_result(service, result_id, "governance-risk", token_hash)["samples"]
     keyword, level, status = (str(payload.get(key, "")) for key in ("keyword", "level", "status"))
-    rows = [row for row in rows if (not keyword or keyword in row["id"] + row["text"]) and
-            (not level or row["findings"] and row["maximum_suggested_level"] == level) and
-            (not status or row["status"] == status)]
+    rows = _filter_risk_samples(rows, keyword, level, status, payload.get("candidates_only") is True)
     return success(request, rows)
 
 

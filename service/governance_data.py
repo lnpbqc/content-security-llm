@@ -23,6 +23,24 @@ RISK_LEVELS = [
     {"level": "LOW", "label": "低风险", "color": "#1687ff", "definition": "存在有限风险线索"},
     {"level": "NOTICE", "label": "提示", "color": "#8b5cf6", "definition": "需要补充核查的线索"},
 ]
+RISK_LEVEL_DEFINITIONS_V2 = {
+    "NOTICE": "只有补充核验的线索，如匿名转述缺出处，正文中没有具体反证或明确影响。",
+    "LOW": (
+        "有具体证据，但影响或身份关联范围有限。例如仅公开站内账号加注册年份或月份，"
+        "可借助额外信息缩小范围，正文缺少姓名、联系方式、精确登记时间和敏感资料；"
+        "或者正文显示局部、可逆的错误通知影响了少量读者。"
+    ),
+    "MEDIUM": (
+        "有较明确的身份关联或实际潜在伤害。例如完整账号与精确登记时间及私人邮箱"
+        "共同公开，或者其他可直接关联个人的证据。"
+    ),
+    "HIGH": "有公开泄露可关联到具体账户的病历等敏感个人资料的直接证据，或者有直接、严重伤害的证据。",
+}
+RISK_LEVEL_INSTRUCTIONS_V2 = (
+    "命中规则只表示有候选风险。先引用原文证据，再按等级定义确定严重程度。"
+    "账号和粗粒度登记时间同时出现时，只有存在更多可直接识别个人的证据才判中风险。"
+    "正文只证明有限关联时按低风险判断。单凭缺出处且没有具体反证或影响时按提示判断。"
+)
 RISK_RULES = [
     {"id": "PII-03", "version": "1.0", "category": "个人信息暴露", "name": "可关联身份信息核验",
      "text": "账户标识及注册时间等可关联信息需核验公开范围与授权依据。",
@@ -100,6 +118,18 @@ class BusinessGovernanceData:
         if kind == "governance-risk" and scheme_id == "risk-v1":
             return {"scheme_id": scheme_id, "name": "内容语义风险分级 v1.0",
                     "categories": RISK_CATEGORIES, "levels": RISK_LEVELS, "rules": RISK_RULES}
+        if kind == "governance-risk" and scheme_id == "risk-v2":
+            return {
+                "scheme_id": scheme_id,
+                "name": "内容语义风险分级 v2.0（细化等级边界）",
+                "categories": RISK_CATEGORIES,
+                "levels": [
+                    {**level, "definition": RISK_LEVEL_DEFINITIONS_V2[level["level"]]}
+                    for level in RISK_LEVELS
+                ],
+                "rules": RISK_RULES,
+                "instructions": RISK_LEVEL_INSTRUCTIONS_V2,
+            }
         raise ValueError("不支持的治理方案")
 
     def samples(self, scope: Dict[str, Any]) -> List[Dict[str, Any]]:

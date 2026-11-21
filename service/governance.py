@@ -257,6 +257,7 @@ class GovernanceService:
                     "不得仅凭民族、文化、社区等词语判风险，也不得把普通描述缺少出处直接视为误导。"
                     "每条风险的 quote 必须是当前遮蔽正文中逐字出现的连续片段，并说明该片段如何满足规则条件。"
                     "依据不足或无法判断时返回 unassessable、空 findings 和原因。"
+                    + policy.get("instructions", "")
                 )}
 
     def _risk_text(self, sample: Dict[str, Any]) -> str:
@@ -434,6 +435,7 @@ class GovernanceService:
         """汇总异常发现，并把可用字段建议保存为草稿候选。"""
         rows = []
         failed = unavailable = 0
+        polluted_total = identified_pollution = 0
         now = utc_now().isoformat()
         for sample in samples:
             outcome = outcomes[sample["id"]]
@@ -444,6 +446,9 @@ class GovernanceService:
             if output["status"] == "unavailable":
                 unavailable += 1
             findings = output["findings"]
+            if output["status"] == "assessed" and sample["metadata"].get("reference_is_anomaly") is True:
+                polluted_total += 1
+                identified_pollution += bool(findings)
             candidates = [{"candidate_id": str(uuid4()),
                            "input_sample_revision_id": sample["revision_id"],
                            "field_changes": finding["fieldChanges"], "reason": finding["reason"],
@@ -474,7 +479,11 @@ class GovernanceService:
                         "anomaly_count": anomaly_count,
                         "ratio": round(anomaly_count / valid * 100, 1) if valid else 0,
                         "pending_count": anomaly_count, "review_count": 0, "processed_count": 0,
-                        "primary_type_counts": counts})
+                        "primary_type_counts": counts,
+                        "pollution_identification": {
+                            "correct_count": identified_pollution, "total_count": polluted_total,
+                            "valid_count": valid,
+                        }})
         return summary, rows
 
     def _risk_snapshot(self, task, policy, samples, outcomes, result_id):

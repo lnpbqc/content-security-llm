@@ -396,25 +396,37 @@ def risk_result_weight_accuracy(request: Request, result_id: str,
                                              summary.get("valid_count")))
 
 
+def _filter_risk_samples(rows, keyword, level, status, candidates_only):
+    return [
+        row for row in rows
+        if (not candidates_only or row["findings"])
+        and (not keyword or keyword in row["id"] + row["text"])
+        and (not level or row["findings"] and row["maximum_suggested_level"] == level)
+        and (not status or row["status"] == status)
+    ]
+
+
 @router.get("/data-governance/risk-results/{result_id}/samples", dependencies=[risk_kind])
 def risk_samples(request: Request, result_id: str, page: int = Query(1, ge=1),
                  page_size: int = Query(10, ge=1, le=200), keyword: str = "",
                  level: str = "", status: str = "", sort_by: Optional[str] = None,
-                 sort_order: Optional[str] = None,
+                 sort_order: Optional[str] = None, candidates_only: bool = False,
                  service: GovernanceService = Depends(get_service),
                  token_hash: str = Depends(require_token)):
     """按风险等级等条件筛选已保存样本并分页。"""
-    rows = list(_get_result(service, result_id, "governance-risk", token_hash)["samples"])
-    rows = [row for row in rows if (not keyword or keyword in row["id"] + row["text"]) and
-            (not level or row["findings"] and row["maximum_suggested_level"] == level) and
-            (not status or row["status"] == status)]
+    rows = _get_result(service, result_id, "governance-risk", token_hash)["samples"]
+    rows = _filter_risk_samples(rows, keyword, level, status, candidates_only)
     if sort_by is not None or sort_order is not None:
         if sort_by not in {"maximum_suggested_level", "status"} or sort_order not in {"asc", "desc"}:
             raise HTTPException(422, detail={"code": "invalid_sort", "message": "风险排序条件无效"})
         ranks = {"NOTICE": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3}
         rows.sort(key=lambda row: row["id"])
-        rows.sort(key=lambda row: ranks.get(row["maximum_suggested_level"], -1) if sort_by == "maximum_suggested_level"
-                  else row["status"], reverse=sort_order == "desc")
+        descending = sort_order == "desc"
+        if sort_by == "maximum_suggested_level":
+            rows.sort(key=lambda row: ranks.get(row["maximum_suggested_level"], -1) if row["findings"] else -1,
+                      reverse=descending)
+        else:
+            rows.sort(key=lambda row: row["status"], reverse=descending)
     return success(request, _page(rows, page, page_size))
 
 
